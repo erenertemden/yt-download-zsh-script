@@ -1,4 +1,6 @@
-# 📥 YouTube Video Downloader & QuickTime Converter Script
+# 📥 YouTube Download and QuickTime Converter (ZSH Script)
+
+![Screenshot](screenshot.png)
 
 This is a simple **Zsh script** that allows you to:
 
@@ -99,8 +101,6 @@ Which file format do you want? (e.g., mp4, webm, mkv):
 ## 📜 License
 
 This project is licensed under the [MIT License](LICENSE).
-
----
 
 # 🎯 Final Note
 This is a quick, powerful tool to handle YouTube downloads and conversions completely from your macOS Terminal.  
