@@ -82,6 +82,7 @@ enum Focus {
     Resolution,
     Format,
     Convert,
+    Encoder,
     Start,
 }
 
@@ -91,7 +92,8 @@ impl Focus {
             Self::Url => Self::Resolution,
             Self::Resolution => Self::Format,
             Self::Format => Self::Convert,
-            Self::Convert => Self::Start,
+            Self::Convert => Self::Encoder,
+            Self::Encoder => Self::Start,
             Self::Start => Self::Url,
         }
     }
@@ -102,7 +104,40 @@ impl Focus {
             Self::Resolution => Self::Url,
             Self::Format => Self::Resolution,
             Self::Convert => Self::Format,
-            Self::Start => Self::Convert,
+            Self::Encoder => Self::Convert,
+            Self::Start => Self::Encoder,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EncoderMode {
+    AppleHardware,
+    CpuX264,
+}
+
+impl Default for EncoderMode {
+    fn default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::AppleHardware
+        } else {
+            Self::CpuX264
+        }
+    }
+}
+
+impl EncoderMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AppleHardware => "Fast Apple Hardware",
+            Self::CpuX264 => "Smaller CPU x264",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::AppleHardware => Self::CpuX264,
+            Self::CpuX264 => Self::AppleHardware,
         }
     }
 }
@@ -128,6 +163,7 @@ struct App {
     resolution_idx: usize,
     format_idx: usize,
     convert: bool,
+    encoder_mode: EncoderMode,
     output_dir: PathBuf,
     logs: VecDeque<String>,
     progress: Option<Progress>,
@@ -145,6 +181,7 @@ impl Default for App {
             resolution_idx: 0,
             format_idx: 0,
             convert: true,
+            encoder_mode: EncoderMode::default(),
             output_dir: default_output_dir(),
             logs: VecDeque::new(),
             progress: None,
@@ -236,6 +273,7 @@ impl App {
                 self.format_idx = cycle_index(self.format_idx, FORMATS.len(), direction);
             }
             Focus::Convert => self.convert = !self.convert,
+            Focus::Encoder => self.encoder_mode = self.encoder_mode.next(),
             _ => {}
         }
     }
@@ -261,6 +299,7 @@ impl App {
         let format = FORMATS[self.format_idx].to_string();
         let output_dir = self.output_dir.clone();
         let convert = self.convert;
+        let encoder_mode = self.encoder_mode;
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
@@ -272,6 +311,7 @@ impl App {
                     format,
                     output_dir,
                     convert,
+                    encoder_mode,
                 },
             );
         });
@@ -334,6 +374,7 @@ struct JobConfig {
     format: String,
     output_dir: PathBuf,
     convert: bool,
+    encoder_mode: EncoderMode,
 }
 
 fn run_download_job(tx: Sender<WorkerEvent>, config: JobConfig) {
@@ -355,6 +396,9 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
     send_log(tx, format!("Output: {}", config.output_dir.display()));
     send_log(tx, format!("Resolution: {}", config.resolution));
     send_log(tx, format!("Format: {}", config.format));
+    if config.convert {
+        send_log(tx, format!("Encoder: {}", config.encoder_mode.label()));
+    }
 
     let selector = format_selector(&config.format, &config.resolution);
     let output_template = config.output_dir.join("%(title)s.%(ext)s");
@@ -391,7 +435,7 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
 
     if config.convert {
         let files = new_downloaded_files(&config.output_dir, &config.format, &before, started_at);
-        convert_files(tx, files)?;
+        convert_files(tx, files, config.encoder_mode)?;
     }
 
     let message = if config.convert {
@@ -456,7 +500,11 @@ where
     });
 }
 
-fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), String> {
+fn convert_files(
+    tx: &Sender<WorkerEvent>,
+    files: Vec<PathBuf>,
+    encoder_mode: EncoderMode,
+) -> Result<(), String> {
     if files.is_empty() {
         send_log(
             tx,
@@ -464,6 +512,16 @@ fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), St
         );
         return Ok(());
     }
+
+    let requested_encoder_mode = encoder_mode;
+    let encoder_mode = effective_encoder_mode(encoder_mode);
+    if encoder_mode != requested_encoder_mode {
+        send_log(
+            tx,
+            "Apple hardware encoding is only available on macOS; using CPU x264 instead.",
+        );
+    }
+    send_log(tx, format!("Converting with {}", encoder_mode.label()));
 
     for (index, file) in files.iter().enumerate() {
         let output = fixed_mp4_path(file);
@@ -494,23 +552,23 @@ fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), St
             detail: detail.clone(),
         }));
 
-        let mut child = Command::new("ffmpeg")
+        let mut command = Command::new("ffmpeg");
+        command
             .arg("-y")
             .arg("-nostats")
             .arg("-progress")
             .arg("pipe:1")
             .arg("-i")
-            .arg(file)
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-preset")
-            .arg("fast")
-            .arg("-crf")
-            .arg("23")
+            .arg(file);
+        append_video_encoder_args(&mut command, encoder_mode);
+
+        let mut child = command
             .arg("-c:a")
             .arg("aac")
             .arg("-b:a")
             .arg("128k")
+            .arg("-movflags")
+            .arg("+faststart")
             .arg(&output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -550,6 +608,39 @@ fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), St
     }));
 
     Ok(())
+}
+
+fn effective_encoder_mode(encoder_mode: EncoderMode) -> EncoderMode {
+    if encoder_mode == EncoderMode::AppleHardware && !cfg!(target_os = "macos") {
+        EncoderMode::CpuX264
+    } else {
+        encoder_mode
+    }
+}
+
+fn append_video_encoder_args(command: &mut Command, encoder_mode: EncoderMode) {
+    match encoder_mode {
+        EncoderMode::AppleHardware => {
+            command
+                .arg("-c:v")
+                .arg("h264_videotoolbox")
+                .arg("-b:v")
+                .arg("6000k")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        EncoderMode::CpuX264 => {
+            command
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("fast")
+                .arg("-crf")
+                .arg("23")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -721,6 +812,15 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             app.focus == Focus::Convert,
             "QuickTime mp4",
             if app.convert { "enabled" } else { "disabled" },
+        ),
+        selectable_line(
+            app.focus == Focus::Encoder,
+            "Encoder",
+            if app.convert {
+                app.encoder_mode.label()
+            } else {
+                "not used"
+            },
         ),
         selectable_line(
             false,

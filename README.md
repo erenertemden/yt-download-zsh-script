@@ -26,6 +26,7 @@ The current TUI is an MVP with:
 - Resolution selection
 - Output format selection
 - QuickTime conversion toggle
+- Encoder selection for fast Apple hardware encoding or smaller CPU x264 output
 - Live `yt-dlp` / `ffmpeg` logs
 - Download and conversion progress when the tools report timing output
 - Result screen with new-download and open-folder actions
@@ -35,7 +36,7 @@ The current TUI is an MVP with:
 ## Features
 
 - macOS-first terminal workflow for Terminal.app, iTerm2, and similar terminal emulators
-- Ratatui form for URL, resolution, format, and QuickTime conversion
+- Ratatui form for URL, resolution, format, QuickTime conversion, and encoder mode
 - Supports single videos and playlists through `yt-dlp`
 - Live terminal logs with download and conversion progress
 - Optional conversion to `fixed-*.mp4` for QuickTime Player compatibility
@@ -50,6 +51,7 @@ This project is designed around common macOS defaults:
 
 - Downloads go to `~/Downloads/youtube_downloads`.
 - QuickTime conversion creates H.264/AAC `.mp4` files, which are friendly to QuickTime Player, Finder preview, and AirDrop workflows.
+- Apple Hardware mode uses FFmpeg's VideoToolbox encoder on macOS for faster conversion on Apple Silicon and supported Intel Macs.
 - The result screen can open the output folder with the macOS `open` command.
 - Homebrew is the recommended way to install Rust, `yt-dlp`, and `ffmpeg`.
 - The intended release targets are Apple Silicon (`aarch64-apple-darwin`) and Intel Macs (`x86_64-apple-darwin`).
@@ -127,12 +129,13 @@ The app opens a terminal UI with these fields:
 - `Resolution`: `Best`, `1080`, `720`, or `480`
 - `Format`: `mp4`, `webm`, or `mkv`
 - `QuickTime mp4`: whether to create macOS-friendly `fixed-*.mp4` files after download
+- `Encoder`: `Fast Apple Hardware` or `Smaller CPU x264`
 - `Output`: currently fixed to `~/Downloads/youtube_downloads`
 
 Controls inside the TUI:
 
 - `Tab`, `Up`, `Down`: move between fields
-- `Left`, `Right`: change resolution or format
+- `Left`, `Right`: change resolution, format, or encoder mode
 - `Space`: toggle QuickTime conversion
 - `Enter`: confirm/start, or start a new download on the result screen
 - `o`: open output folder on the result screen
@@ -144,8 +147,11 @@ The TUI flow:
 2. Choose resolution: `Best`, `1080`, `720`, or `480`.
 3. Choose output format: `mp4`, `webm`, or `mkv`.
 4. Decide whether to create QuickTime-compatible `fixed-*.mp4` files for macOS playback.
-5. Start the download and watch progress/logs.
-6. Review the result screen.
+5. Choose an encoder mode:
+   - `Fast Apple Hardware`: uses `h264_videotoolbox`; best for speed on Apple Silicon.
+   - `Smaller CPU x264`: uses `libx264`; slower, but usually better size/quality control.
+6. Start the download and watch progress/logs.
+7. Review the result screen.
 
 ---
 
@@ -166,6 +172,8 @@ fixed-original-title.mp4
 
 The converted file uses H.264 video and AAC audio in an `.mp4` container, which is the safest default for QuickTime Player on macOS.
 
+`Fast Apple Hardware` uses a bitrate-based VideoToolbox encode. `Smaller CPU x264` uses CRF-based x264 encoding and usually produces more size-efficient files, but it takes longer.
+
 The exact original extension depends on the selected format and what `yt-dlp` can obtain from YouTube.
 
 ---
@@ -176,6 +184,8 @@ The TUI delegates the actual media work to proven command line tools:
 
 - `yt-dlp` handles video and playlist downloads.
 - `ffmpeg` handles QuickTime-friendly H.264/AAC conversion.
+- `h264_videotoolbox` is used for fast hardware encoding when `Fast Apple Hardware` is selected.
+- `libx264` is used when `Smaller CPU x264` is selected.
 
 For `Best`, the app asks `yt-dlp` for the best available video and audio combination. For fixed resolutions like `1080`, `720`, or `480`, it asks for the best available stream at or below that height.
 
