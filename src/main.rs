@@ -229,7 +229,8 @@ impl App {
     fn adjust_selection(&mut self, direction: isize) {
         match self.focus {
             Focus::Resolution => {
-                self.resolution_idx = cycle_index(self.resolution_idx, RESOLUTIONS.len(), direction);
+                self.resolution_idx =
+                    cycle_index(self.resolution_idx, RESOLUTIONS.len(), direction);
             }
             Focus::Format => {
                 self.format_idx = cycle_index(self.format_idx, FORMATS.len(), direction);
@@ -263,13 +264,16 @@ impl App {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
-            run_download_job(tx, JobConfig {
-                url,
-                resolution,
-                format,
-                output_dir,
-                convert,
-            });
+            run_download_job(
+                tx,
+                JobConfig {
+                    url,
+                    resolution,
+                    format,
+                    output_dir,
+                    convert,
+                },
+            );
         });
 
         self.worker_rx = Some(rx);
@@ -425,7 +429,6 @@ fn stream_child_output(
 #[derive(Clone, Copy)]
 enum OutputKind {
     YtDlp,
-    Ffmpeg,
 }
 
 fn spawn_reader<R>(reader: R, tx: Sender<WorkerEvent>, kind: OutputKind)
@@ -444,7 +447,6 @@ where
 
             if let Some(progress) = match kind {
                 OutputKind::YtDlp => parse_ytdlp_progress(&line),
-                OutputKind::Ffmpeg => None,
             } {
                 let _ = tx.send(WorkerEvent::Progress(progress));
             }
@@ -456,7 +458,10 @@ where
 
 fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), String> {
     if files.is_empty() {
-        send_log(tx, "No new files matched the selected format; skipping conversion.");
+        send_log(
+            tx,
+            "No new files matched the selected format; skipping conversion.",
+        );
         return Ok(());
     }
 
@@ -464,21 +469,36 @@ fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), St
         let output = fixed_mp4_path(file);
         let detail = format!(
             "{} -> {}",
-            file.file_name().and_then(|name| name.to_str()).unwrap_or("video"),
+            file.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("video"),
             output
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("fixed-video.mp4")
         );
+        let duration_secs = probe_duration(file);
+        if duration_secs.is_none() {
+            send_log(
+                tx,
+                format!(
+                    "Could not determine duration for {}; conversion progress will update when the file finishes.",
+                    file.file_name().and_then(|name| name.to_str()).unwrap_or("video")
+                ),
+            );
+        }
 
         let _ = tx.send(WorkerEvent::Progress(Progress {
             stage: format!("Converting {}/{}", index + 1, files.len()),
             ratio: Some(index as f64 / files.len() as f64),
-            detail,
+            detail: detail.clone(),
         }));
 
         let mut child = Command::new("ffmpeg")
             .arg("-y")
+            .arg("-nostats")
+            .arg("-progress")
+            .arg("pipe:1")
             .arg("-i")
             .arg(file)
             .arg("-c:v")
@@ -497,7 +517,16 @@ fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), St
             .spawn()
             .map_err(|error| format!("Could not start ffmpeg: {error}"))?;
 
-        stream_child_output(&mut child, Sender::clone(tx), OutputKind::Ffmpeg)?;
+        stream_ffmpeg_output(
+            &mut child,
+            Sender::clone(tx),
+            FfmpegProgressContext {
+                file_index: index,
+                total_files: files.len(),
+                duration_secs,
+                detail,
+            },
+        )?;
 
         let status = child
             .wait()
@@ -506,6 +535,12 @@ fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), St
         if !status.success() {
             return Err(format!("ffmpeg exited with status: {status}"));
         }
+
+        let _ = tx.send(WorkerEvent::Progress(Progress {
+            stage: format!("Converting {}/{}", index + 1, files.len()),
+            ratio: Some((index + 1) as f64 / files.len() as f64),
+            detail: "File converted.".to_string(),
+        }));
     }
 
     let _ = tx.send(WorkerEvent::Progress(Progress {
@@ -515,6 +550,110 @@ fn convert_files(tx: &Sender<WorkerEvent>, files: Vec<PathBuf>) -> Result<(), St
     }));
 
     Ok(())
+}
+
+#[derive(Clone)]
+struct FfmpegProgressContext {
+    file_index: usize,
+    total_files: usize,
+    duration_secs: Option<f64>,
+    detail: String,
+}
+
+fn stream_ffmpeg_output(
+    child: &mut std::process::Child,
+    tx: Sender<WorkerEvent>,
+    context: FfmpegProgressContext,
+) -> Result<(), String> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not capture ffmpeg stdout.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Could not capture ffmpeg stderr.".to_string())?;
+
+    spawn_ffmpeg_progress_reader(stdout, tx.clone(), context);
+    spawn_ffmpeg_log_reader(stderr, tx);
+    Ok(())
+}
+
+fn spawn_ffmpeg_progress_reader<R>(
+    reader: R,
+    tx: Sender<WorkerEvent>,
+    context: FfmpegProgressContext,
+) where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        let stage = format!(
+            "Converting {}/{}",
+            context.file_index + 1,
+            context.total_files
+        );
+
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            if line == "progress=end" {
+                let _ = tx.send(WorkerEvent::Progress(Progress {
+                    stage: stage.clone(),
+                    ratio: Some((context.file_index + 1) as f64 / context.total_files as f64),
+                    detail: context.detail.clone(),
+                }));
+                continue;
+            }
+
+            let Some(duration_secs) = context.duration_secs else {
+                continue;
+            };
+            let Some(out_time_secs) = parse_ffmpeg_out_time(line) else {
+                continue;
+            };
+
+            let file_ratio = (out_time_secs / duration_secs).clamp(0.0, 1.0);
+            let overall_ratio =
+                (context.file_index as f64 + file_ratio) / context.total_files as f64;
+            let detail = format!(
+                "{} ({}/{})",
+                context.detail,
+                format_duration(out_time_secs),
+                format_duration(duration_secs)
+            );
+
+            let _ = tx.send(WorkerEvent::Progress(Progress {
+                stage: stage.clone(),
+                ratio: Some(overall_ratio),
+                detail,
+            }));
+        }
+    });
+}
+
+fn spawn_ffmpeg_log_reader<R>(reader: R, tx: Sender<WorkerEvent>)
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let _ = tx.send(WorkerEvent::Log(line));
+        }
+    });
 }
 
 fn draw(frame: &mut Frame, app: &App) {
@@ -573,7 +712,11 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             "Resolution",
             RESOLUTIONS[app.resolution_idx],
         ),
-        selectable_line(app.focus == Focus::Format, "Format", FORMATS[app.format_idx]),
+        selectable_line(
+            app.focus == Focus::Format,
+            "Format",
+            FORMATS[app.format_idx],
+        ),
         selectable_line(
             app.focus == Focus::Convert,
             "QuickTime mp4",
@@ -582,7 +725,9 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
         selectable_line(
             false,
             "Output",
-            app.output_dir.to_str().unwrap_or("~/Downloads/youtube_downloads"),
+            app.output_dir
+                .to_str()
+                .unwrap_or("~/Downloads/youtube_downloads"),
         ),
         Line::raw(""),
         button_line(app.focus == Focus::Start, "Start Download"),
@@ -597,10 +742,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_running(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Min(6),
-        ])
+        .constraints([Constraint::Length(5), Constraint::Min(6)])
         .split(area);
 
     let progress = app.progress.clone().unwrap_or(Progress {
@@ -630,10 +772,7 @@ fn draw_running(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_done(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(6),
-            Constraint::Min(6),
-        ])
+        .constraints([Constraint::Length(6), Constraint::Min(6)])
         .split(area);
 
     let success = app.result_success.unwrap_or(false);
@@ -670,8 +809,12 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.screen {
-        Screen::Form => "Tab/Up/Down focus  Left/Right choose  Space toggle  Enter confirm/start  q quit",
-        Screen::Running => "Download is running. Logs update live; q/Esc is disabled until the job finishes.",
+        Screen::Form => {
+            "Tab/Up/Down focus  Left/Right choose  Space toggle  Enter confirm/start  q quit"
+        }
+        Screen::Running => {
+            "Download is running. Logs update live; q/Esc is disabled until the job finishes."
+        }
         Screen::Done => "Enter/n new download  o open folder  q/Esc quit",
     };
     let help = Paragraph::new(text)
@@ -715,7 +858,9 @@ fn button_line<'a>(selected: bool, label: &'a str) -> Line<'a> {
 
 fn default_output_dir() -> PathBuf {
     if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home).join("Downloads").join("youtube_downloads")
+        PathBuf::from(home)
+            .join("Downloads")
+            .join("youtube_downloads")
     } else {
         PathBuf::from("youtube_downloads")
     }
@@ -770,6 +915,81 @@ fn compact_download_detail(line: &str) -> String {
         return trimmed[start + 4..].to_string();
     }
     trimmed.to_string()
+}
+
+fn probe_duration(file: &Path) -> Option<f64> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-show_entries")
+        .arg("format=duration")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1:nokey=1")
+        .arg(file)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let duration = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+
+    duration
+        .is_finite()
+        .then_some(duration)
+        .filter(|value| *value > 0.0)
+}
+
+fn parse_ffmpeg_out_time(line: &str) -> Option<f64> {
+    if let Some(value) = line.strip_prefix("out_time=") {
+        return parse_hms_time(value);
+    }
+
+    if let Some(value) = line.strip_prefix("out_time_us=") {
+        return parse_progress_microseconds(value);
+    }
+
+    if let Some(value) = line.strip_prefix("out_time_ms=") {
+        return parse_progress_microseconds(value);
+    }
+
+    None
+}
+
+fn parse_progress_microseconds(value: &str) -> Option<f64> {
+    let micros = value.trim().parse::<f64>().ok()?;
+    micros.is_finite().then_some(micros / 1_000_000.0)
+}
+
+fn parse_hms_time(value: &str) -> Option<f64> {
+    let mut parts = value.trim().split(':');
+    let hours = parts.next()?.parse::<f64>().ok()?;
+    let minutes = parts.next()?.parse::<f64>().ok()?;
+    let seconds = parts.next()?.parse::<f64>().ok()?;
+
+    if parts.next().is_some() || !hours.is_finite() || !minutes.is_finite() || !seconds.is_finite()
+    {
+        return None;
+    }
+
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
+}
+
+fn format_duration(seconds: f64) -> String {
+    let total_seconds = seconds.max(0.0).round() as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
 }
 
 fn snapshot_files(dir: &Path, ext: &str) -> HashSet<PathBuf> {
@@ -847,4 +1067,32 @@ fn open_output_dir(path: &Path) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ytdlp_percent() {
+        assert_eq!(
+            parse_percent("[download]  42.5% of 10.00MiB at 1.00MiB/s ETA 00:05"),
+            Some(42.5)
+        );
+    }
+
+    #[test]
+    fn parses_ffmpeg_out_time() {
+        assert_eq!(
+            parse_ffmpeg_out_time("out_time=00:01:02.500000"),
+            Some(62.5)
+        );
+        assert_eq!(parse_ffmpeg_out_time("out_time_us=2500000"), Some(2.5));
+    }
+
+    #[test]
+    fn formats_duration() {
+        assert_eq!(format_duration(62.4), "1:02");
+        assert_eq!(format_duration(3661.0), "1:01:01");
+    }
 }

@@ -27,7 +27,7 @@ The current TUI is an MVP with:
 - Output format selection
 - QuickTime conversion toggle
 - Live `yt-dlp` / `ffmpeg` logs
-- Download progress when `yt-dlp` reports percentage output
+- Download and conversion progress when the tools report timing output
 - Result screen with new-download and open-folder actions
 
 ---
@@ -37,7 +37,7 @@ The current TUI is an MVP with:
 - macOS-first terminal workflow for Terminal.app, iTerm2, and similar terminal emulators
 - Ratatui form for URL, resolution, format, and QuickTime conversion
 - Supports single videos and playlists through `yt-dlp`
-- Live terminal logs and download progress
+- Live terminal logs with download and conversion progress
 - Optional conversion to `fixed-*.mp4` for QuickTime Player compatibility
 - Result screen action to open the download folder in Finder
 - Saves downloads to `~/Downloads/youtube_downloads`
@@ -62,7 +62,7 @@ The app may also work on Linux because Ratatui, `yt-dlp`, and `ffmpeg` are cross
 
 - Rust toolchain (`cargo`, `rustc`)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-- [ffmpeg](https://ffmpeg.org/)
+- [ffmpeg](https://ffmpeg.org/) including `ffprobe`
 - macOS Terminal, iTerm2, or another compatible terminal emulator
 
 On macOS, install dependencies with Homebrew:
@@ -77,6 +77,7 @@ Verify that the required commands are available:
 cargo --version
 yt-dlp --version
 ffmpeg -version
+ffprobe -version
 ```
 
 ---
