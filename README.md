@@ -23,6 +23,7 @@ There is not yet a Homebrew formula, GitHub release binary, or `cargo install` p
 The current TUI is an MVP with:
 
 - URL input
+- Available source format loading from `yt-dlp`
 - Resolution selection
 - Output format selection
 - QuickTime conversion toggle
@@ -36,12 +37,38 @@ The current TUI is an MVP with:
 ## Features
 
 - macOS-first terminal workflow for Terminal.app, iTerm2, and similar terminal emulators
-- Ratatui form for URL, resolution, format, QuickTime conversion, and encoder mode
+- Ratatui form for URL, source format, container, QuickTime conversion, and encoder mode
 - Supports single videos and playlists through `yt-dlp`
 - Live terminal logs with download and conversion progress
 - Optional conversion to `fixed-*.mp4` for QuickTime Player compatibility
 - Result screen action to open the download folder in Finder
 - Saves downloads to `~/Downloads/youtube_downloads`
+
+---
+
+## Project Structure
+
+The Rust app is split by responsibility so new features can be added without growing a single large `main.rs`:
+
+```text
+src/
+  main.rs       app entrypoint and module wiring
+  terminal.rs   terminal setup, teardown, and event loop
+  app.rs        application state, keyboard input, and worker events
+  ui.rs         Ratatui rendering
+  job.rs        yt-dlp and ffmpeg worker process orchestration
+  media.rs      available-format parsing, progress parsing, file discovery, encoder args
+  types.rs      shared enums/events/progress models
+  config.rs     constants and default paths
+  system.rs     platform-specific helpers such as opening the output folder
+```
+
+Suggested ownership for future changes:
+
+- Add new form fields in `types.rs`, `app.rs`, and `ui.rs`.
+- Change download or conversion behavior in `job.rs`.
+- Change ffmpeg/yt-dlp parsing, available-format parsing, or encoder details in `media.rs`.
+- Change terminal lifecycle behavior in `terminal.rs`.
 
 ---
 
@@ -126,8 +153,9 @@ cargo run
 The app opens a terminal UI with these fields:
 
 - `URL`: YouTube video or playlist URL
-- `Resolution`: `Best`, `1080`, `720`, or `480`
-- `Format`: `mp4`, `webm`, or `mkv`
+- `Source Format`: `Auto best` or a format loaded from the current URL
+- `Fallback Res`: `Best`, `1080`, `720`, or `480`; used only when `Source Format` is `Auto best`
+- `Container`: `mp4`, `webm`, or `mkv`
 - `QuickTime mp4`: whether to create macOS-friendly `fixed-*.mp4` files after download
 - `Encoder`: `Fast Apple Hardware` or `Smaller CPU x264`
 - `Output`: currently fixed to `~/Downloads/youtube_downloads`
@@ -135,7 +163,8 @@ The app opens a terminal UI with these fields:
 Controls inside the TUI:
 
 - `Tab`, `Up`, `Down`: move between fields
-- `Left`, `Right`: change resolution, format, or encoder mode
+- `f`: load available formats for the current URL
+- `Left`, `Right`: change source format, resolution, container, or encoder mode
 - `Space`: toggle QuickTime conversion
 - `Enter`: confirm/start, or start a new download on the result screen
 - `o`: open output folder on the result screen
@@ -144,14 +173,16 @@ Controls inside the TUI:
 The TUI flow:
 
 1. Paste a YouTube video or playlist URL.
-2. Choose resolution: `Best`, `1080`, `720`, or `480`.
-3. Choose output format: `mp4`, `webm`, or `mkv`.
-4. Decide whether to create QuickTime-compatible `fixed-*.mp4` files for macOS playback.
-5. Choose an encoder mode:
+2. Press `f` to load the formats that `yt-dlp` reports for that URL.
+3. Choose `Source Format`, or leave it on `Auto best`.
+4. Choose fallback resolution: `Best`, `1080`, `720`, or `480`; this is ignored when an exact source format is selected.
+5. Choose output container: `mp4`, `webm`, or `mkv`.
+6. Decide whether to create QuickTime-compatible `fixed-*.mp4` files for macOS playback.
+7. Choose an encoder mode:
    - `Fast Apple Hardware`: uses `h264_videotoolbox`; best for speed on Apple Silicon.
    - `Smaller CPU x264`: uses `libx264`; slower, but usually better size/quality control.
-6. Start the download and watch progress/logs.
-7. Review the result screen.
+8. Start the download and watch progress/logs.
+9. Review the result screen.
 
 ---
 
@@ -187,7 +218,11 @@ The TUI delegates the actual media work to proven command line tools:
 - `h264_videotoolbox` is used for fast hardware encoding when `Fast Apple Hardware` is selected.
 - `libx264` is used when `Smaller CPU x264` is selected.
 
-For `Best`, the app asks `yt-dlp` for the best available video and audio combination. For fixed resolutions like `1080`, `720`, or `480`, it asks for the best available stream at or below that height.
+When `Source Format` is `Auto best`, the app asks `yt-dlp` for the best available video and audio combination. For fixed resolutions like `1080`, `720`, or `480`, it asks for the best available stream at or below that height.
+
+When a loaded source format is selected, the app uses that exact video format ID. If the selected source format is video-only, the app combines it with `bestaudio`. If the selected combined format is unavailable at download time, the selector falls back to `best`.
+
+Loaded source formats are scoped to the current single URL lookup. If a source format is selected, the download runs in single-video mode. Leave `Source Format` on `Auto best` for playlist downloads.
 
 The selected output format is passed to `yt-dlp` as the merge/remux target format. If YouTube does not provide the exact stream combination directly, `yt-dlp` and `ffmpeg` may still need to merge or remux the result.
 
@@ -197,7 +232,7 @@ The selected output format is passed to `yt-dlp` as the merge/remux target forma
 
 - The app currently uses a fixed output directory.
 - Running downloads cannot be cancelled from inside the TUI yet.
-- Format selection is simple; it does not yet show the full `yt-dlp -F` format list.
+- Available format loading is scoped to the current single URL; playlist-wide per-item format selection is not structured yet.
 - Playlist items are shown through logs, not as a structured queue yet.
 - Installers and prebuilt release binaries are not available yet.
 - Linux and Windows are not primary targets yet.
@@ -212,7 +247,7 @@ Useful next improvements:
 - Configurable output directory
 - Cancel/retry support
 - Structured playlist queue
-- Real format picker based on `yt-dlp -F`
+- Dedicated format list view with search/filtering
 - GitHub Actions release builds for Apple Silicon and Intel Macs
 - Homebrew formula for easier installation
 - macOS dependency check screen with Homebrew install hints
