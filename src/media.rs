@@ -11,7 +11,7 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    process_control::{shared_child, wait_for_child, ProcessControl},
+    process_control::{prepare_command, shared_child, wait_for_child, ProcessControl},
     types::{AvailableFormat, EncoderMode, PlaylistProgress, Progress},
 };
 
@@ -31,6 +31,7 @@ pub fn load_available_formats_with_control(
     }
 
     let mut command = Command::new("yt-dlp");
+    prepare_command(&mut command);
     command
         .arg("-J")
         .arg("--no-playlist")
@@ -466,7 +467,16 @@ pub fn looks_like_playlist_only_url(url: &str) -> bool {
         return true;
     }
 
-    has_query_param(url, "list") && !has_query_param(url, "v") && !lower.contains("youtu.be/")
+    has_query_param(url, "list") && !looks_like_single_video_url(&lower)
+}
+
+fn looks_like_single_video_url(lower_url: &str) -> bool {
+    lower_url.contains("youtu.be/")
+        || has_query_param(lower_url, "v")
+        || lower_url.contains("/shorts/")
+        || lower_url.contains("/embed/")
+        || lower_url.contains("/live/")
+        || lower_url.contains("/clip/")
 }
 
 fn has_query_param(url: &str, key: &str) -> bool {
@@ -633,6 +643,15 @@ mod tests {
         ));
         assert!(!looks_like_playlist_only_url(
             "https://youtu.be/abc?list=PL123"
+        ));
+        assert!(!looks_like_playlist_only_url(
+            "https://www.youtube.com/shorts/abc?list=PL123"
+        ));
+        assert!(!looks_like_playlist_only_url(
+            "https://www.youtube.com/embed/abc?list=PL123"
+        ));
+        assert!(!looks_like_playlist_only_url(
+            "https://www.youtube.com/live/abc?list=PL123"
         ));
     }
 

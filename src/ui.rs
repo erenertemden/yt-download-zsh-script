@@ -210,7 +210,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.screen {
         Screen::Form => {
-            "f load formats  Tab/Up/Down focus  type URL/Output  Left/Right choose  Space toggle  Enter confirm/start"
+            "f load formats  Tab/Up/Down focus  type URL/Output  Left/Right choose  Space toggle  Enter start  Esc quit"
         }
         Screen::Running => {
             "Download is running. Logs update live; q/Esc/Ctrl-C cancels the active process."

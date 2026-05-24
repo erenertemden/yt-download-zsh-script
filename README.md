@@ -103,7 +103,8 @@ Controls:
 - `Space`: toggle QuickTime conversion
 - `Enter`: confirm/start, or start a new download on the result screen
 - `o`: open output folder on the result screen
-- `q`, `Esc`: quit when idle and not editing text
+- `Esc`: quit when idle
+- `q`: quit when idle and not editing `URL` or `Output`
 - `q`, `Esc`, `Ctrl-C`: cancel the active process while a download or conversion is running
 
 Basic flow:
@@ -144,13 +145,15 @@ If the selected source format is video-only, the app combines it with `bestaudio
 When `QuickTime mp4` is enabled, the app keeps the downloaded file and creates an additional converted file:
 
 ```text
-original-title.webm
-fixed-original-title.mp4
+original-title [dQw4w9WgXcQ].webm
+fixed-original-title [dQw4w9WgXcQ].mp4
 ```
 
 The converted file uses H.264 video and AAC audio in an `.mp4` container, which is the safest default for QuickTime Player on macOS.
 
 Conversion runs only against newly downloaded or newly modified media files in the output folder. If `yt-dlp` finishes but no new media file can be found, the app reports that as a failure instead of showing a false successful conversion.
+
+Downloaded filenames include the video ID, for example `Title [dQw4w9WgXcQ].mp4`, so playlist items with the same title do not overwrite each other.
 
 Encoder modes:
 

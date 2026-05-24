@@ -15,7 +15,7 @@ use crate::{
         parse_ytdlp_playlist_progress, parse_ytdlp_progress, probe_duration,
         selected_format_selector, snapshot_media_files,
     },
-    process_control::{shared_child, wait_for_child, ProcessControl, SharedChild},
+    process_control::{prepare_command, shared_child, wait_for_child, ProcessControl, SharedChild},
     types::{AvailableFormat, EncoderMode, Progress, WorkerEvent},
 };
 
@@ -66,9 +66,10 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
         .as_ref()
         .map(selected_format_selector)
         .unwrap_or_else(|| format_selector(&config.format, &config.resolution));
-    let output_template = config.output_dir.join("%(title)s.%(ext)s");
+    let output_template = download_output_template(&config.output_dir);
 
     let mut command = Command::new("yt-dlp");
+    prepare_command(&mut command);
     command
         .arg("--newline")
         .arg("--progress")
@@ -255,6 +256,7 @@ fn convert_files(
         }));
 
         let mut command = Command::new("ffmpeg");
+        prepare_command(&mut command);
         command
             .arg("-y")
             .arg("-nostats")
@@ -434,4 +436,22 @@ where
 
 fn send_log(tx: &Sender<WorkerEvent>, line: impl Into<String>) {
     let _ = tx.send(WorkerEvent::Log(line.into()));
+}
+
+fn download_output_template(output_dir: &std::path::Path) -> PathBuf {
+    output_dir.join("%(title)s [%(id)s].%(ext)s")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn output_template_includes_video_id_to_avoid_playlist_collisions() {
+        assert_eq!(
+            download_output_template(Path::new("/tmp/videos")),
+            PathBuf::from("/tmp/videos/%(title)s [%(id)s].%(ext)s")
+        );
+    }
 }
