@@ -100,11 +100,9 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             value_width,
         ),
         selectable_line(
-            false,
+            app.focus == Focus::Output,
             "Output",
-            app.output_dir
-                .to_str()
-                .unwrap_or("~/Downloads/youtube_downloads"),
+            &app.output_dir_input,
             value_width,
         ),
         Line::raw(""),
@@ -120,7 +118,11 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_running(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(6)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Min(5),
+        ])
         .split(area);
 
     let progress = app.progress.clone().unwrap_or(Progress {
@@ -144,7 +146,27 @@ fn draw_running(frame: &mut Frame, app: &App, area: Rect) {
         .label(label);
     frame.render_widget(gauge, chunks[0]);
 
-    draw_logs(frame, app, chunks[1]);
+    draw_queue(frame, app, chunks[1]);
+    draw_logs(frame, app, chunks[2]);
+}
+
+fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
+    let (label, ratio) = if let Some(progress) = app.playlist_progress.as_ref() {
+        let ratio = progress.current as f64 / progress.total.max(1) as f64;
+        (
+            format!("Playlist item {} of {}", progress.current, progress.total),
+            ratio.clamp(0.0, 1.0),
+        )
+    } else {
+        ("Single video or playlist queue pending".to_string(), 0.0)
+    };
+
+    let gauge = Gauge::default()
+        .block(Block::default().title("Queue").borders(Borders::ALL))
+        .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+        .ratio(ratio)
+        .label(label);
+    frame.render_widget(gauge, area);
 }
 
 fn draw_done(frame: &mut Frame, app: &App, area: Rect) {
@@ -188,7 +210,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.screen {
         Screen::Form => {
-            "f load formats  Tab/Up/Down focus  Left/Right choose  Space toggle  Enter confirm/start  q quit"
+            "f load formats  Tab/Up/Down focus  type URL/Output  Left/Right choose  Space toggle  Enter confirm/start"
         }
         Screen::Running => {
             "Download is running. Logs update live; q/Esc/Ctrl-C cancels the active process."

@@ -11,8 +11,9 @@ use std::{
 use crate::{
     media::{
         append_video_encoder_args, effective_encoder_mode, fixed_mp4_path, format_duration,
-        format_selector, new_downloaded_files, parse_ffmpeg_out_time, parse_ytdlp_progress,
-        probe_duration, selected_format_selector, snapshot_media_files,
+        format_selector, new_downloaded_files, parse_ffmpeg_out_time,
+        parse_ytdlp_playlist_progress, parse_ytdlp_progress, probe_duration,
+        selected_format_selector, snapshot_media_files,
     },
     process_control::{shared_child, wait_for_child, ProcessControl, SharedChild},
     types::{AvailableFormat, EncoderMode, Progress, WorkerEvent},
@@ -184,6 +185,12 @@ where
                 OutputKind::YtDlp => parse_ytdlp_progress(&line),
             } {
                 let _ = tx.send(WorkerEvent::Progress(progress));
+            }
+
+            if let Some(progress) = match kind {
+                OutputKind::YtDlp => parse_ytdlp_playlist_progress(&line),
+            } {
+                let _ = tx.send(WorkerEvent::Playlist(progress));
             }
 
             let _ = tx.send(WorkerEvent::Log(line));

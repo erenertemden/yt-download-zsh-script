@@ -40,7 +40,7 @@ Downloads are saved to:
 
 ## Current Status
 
-This is currently a Rust app that can be installed from Git with `cargo install --git`. There is not yet a Homebrew formula, GitHub release binary, or crates.io package.
+This is currently a Rust app that can be installed from Git with `cargo install --git`. A source-based Homebrew formula is included for `--HEAD` installs, but there is not yet a public tap, GitHub release binary, or crates.io package.
 
 Current MVP features:
 
@@ -48,9 +48,11 @@ Current MVP features:
 - Available source format loading from `yt-dlp`
 - Fallback resolution selection
 - Output container selection
+- Editable output directory
 - QuickTime conversion toggle
 - Encoder selection for fast Apple hardware encoding or smaller CPU x264 output
 - Live `yt-dlp` / `ffmpeg` logs
+- Structured playlist queue progress during downloads
 - Download and conversion progress when the tools report timing output
 - Cancel support for the active `yt-dlp` or `ffmpeg` process
 - Result screen with new-download and open-folder actions
@@ -91,7 +93,7 @@ The TUI fields:
 - `Container`: `mp4`, `webm`, or `mkv`
 - `QuickTime mp4`: creates macOS-friendly `fixed-*.mp4` files after download
 - `Encoder`: `Fast Apple Hardware` or `Smaller CPU x264`
-- `Output`: currently fixed to `~/Downloads/youtube_downloads`
+- `Output`: editable output directory; `~/...` paths are expanded on start
 
 Controls:
 
@@ -101,7 +103,7 @@ Controls:
 - `Space`: toggle QuickTime conversion
 - `Enter`: confirm/start, or start a new download on the result screen
 - `o`: open output folder on the result screen
-- `q`, `Esc`: quit when idle
+- `q`, `Esc`: quit when idle and not editing text
 - `q`, `Esc`, `Ctrl-C`: cancel the active process while a download or conversion is running
 
 Basic flow:
@@ -110,10 +112,11 @@ Basic flow:
 2. Leave `Source Format` on `Auto best` for the simplest path, or press `f` to load exact formats for the URL.
 3. If using `Auto best`, choose `Fallback Res`.
 4. Choose output `Container`.
-5. Enable or disable `QuickTime mp4`.
-6. Choose encoder mode if QuickTime conversion is enabled.
-7. Start the download and watch progress/logs.
-8. Review the result screen.
+5. Edit `Output` if the default folder is not right.
+6. Enable or disable `QuickTime mp4`.
+7. Choose encoder mode if QuickTime conversion is enabled.
+8. Start the download and watch progress, queue, and logs.
+9. Review the result screen.
 
 ---
 
@@ -161,9 +164,10 @@ Encoder modes:
 This project is designed around common macOS defaults:
 
 - Downloads go to `~/Downloads/youtube_downloads`.
+- The output folder can be changed directly in the TUI before starting.
 - QuickTime conversion targets Finder preview, QuickTime Player, and AirDrop-friendly files.
 - The result screen opens the output folder with the macOS `open` command.
-- Homebrew is the recommended way to install Rust, `yt-dlp`, and `ffmpeg`.
+- Homebrew is the recommended way to install Rust, `yt-dlp`, and `ffmpeg`; a project formula is included for source installs.
 - Intended release targets are Apple Silicon (`aarch64-apple-darwin`) and Intel Macs (`x86_64-apple-darwin`).
 
 The app may also work on Linux because Ratatui, `yt-dlp`, and `ffmpeg` are cross-platform, but the defaults and docs are optimized for macOS.
@@ -176,6 +180,13 @@ Install the latest version directly from the Git repository:
 
 ```bash
 cargo install --git https://github.com/erenertemden/yt-download-zsh-script
+yt-download-tui
+```
+
+Install from the included Homebrew formula while the project is still HEAD-only:
+
+```bash
+brew install --HEAD ./Formula/yt-download-tui.rb
 yt-download-tui
 ```
 
@@ -197,10 +208,9 @@ yt-download-tui
 
 ## Known Limitations
 
-- Output directory is fixed.
-- Playlist items are shown through logs, not as a structured queue yet.
 - Playlist-wide per-item format selection is not structured yet.
-- Installers and prebuilt release binaries are not available yet.
+- The Homebrew formula is HEAD-only until tagged releases and SHA256 checksums are published.
+- Prebuilt release binaries are not available yet.
 - The screenshot may lag behind the latest TUI fields during active development.
 - Linux and Windows are not primary targets yet.
 
@@ -218,9 +228,12 @@ src/
   ui.rs         Ratatui rendering
   job.rs        yt-dlp and ffmpeg worker process orchestration
   media.rs      available-format parsing, progress parsing, file discovery, encoder args
+  process_control.rs cancellable child-process control
   types.rs      shared enums/events/progress models
   config.rs     constants and default paths
   system.rs     platform-specific helpers such as opening the output folder
+Formula/
+  yt-download-tui.rb Homebrew formula for HEAD installs
 ```
 
 Suggested ownership for future changes:
@@ -233,12 +246,11 @@ Suggested ownership for future changes:
 Useful next improvements:
 
 - Dependency check screen for missing `yt-dlp` or `ffmpeg`
-- Configurable output directory
 - Retry support
-- Structured playlist queue
+- Playlist queue item titles and retry controls
 - Dedicated format list view with search/filtering
 - GitHub Actions release builds for Apple Silicon and Intel Macs
-- Homebrew formula for easier installation
+- Tagged Homebrew release formula with SHA256 checksums
 
 ---
 

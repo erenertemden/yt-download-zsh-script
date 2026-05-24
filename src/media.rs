@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::{
     process_control::{shared_child, wait_for_child, ProcessControl},
-    types::{AvailableFormat, EncoderMode, Progress},
+    types::{AvailableFormat, EncoderMode, PlaylistProgress, Progress},
 };
 
 const VIDEO_EXTENSIONS: &[&str] = &[
@@ -134,6 +134,11 @@ pub fn parse_ytdlp_progress(line: &str) -> Option<Progress> {
         ratio: Some(percent / 100.0),
         detail,
     })
+}
+
+pub fn parse_ytdlp_playlist_progress(line: &str) -> Option<PlaylistProgress> {
+    parse_playlist_marker(line, "Downloading item ")
+        .or_else(|| parse_playlist_marker(line, "Downloading video "))
 }
 
 pub fn probe_duration(file: &Path) -> Option<f64> {
@@ -376,6 +381,27 @@ fn compact_download_detail(line: &str) -> String {
     trimmed.to_string()
 }
 
+fn parse_playlist_marker(line: &str, marker: &str) -> Option<PlaylistProgress> {
+    let start = line.find(marker)? + marker.len();
+    let rest = &line[start..];
+    let (current, rest) = parse_leading_usize(rest)?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("of ")?;
+    let (total, _) = parse_leading_usize(rest)?;
+
+    (current > 0 && total > 0).then_some(PlaylistProgress { current, total })
+}
+
+fn parse_leading_usize(value: &str) -> Option<(usize, &str)> {
+    let digits_len = value
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()?;
+    let (digits, rest) = value.split_at(digits_len);
+    Some((digits.parse().ok()?, rest))
+}
+
 fn parse_progress_microseconds(value: &str) -> Option<f64> {
     let micros = value.trim().parse::<f64>().ok()?;
     micros.is_finite().then_some(micros / 1_000_000.0)
@@ -500,6 +526,25 @@ mod tests {
             parse_percent("[download]  42.5% of 10.00MiB at 1.00MiB/s ETA 00:05"),
             Some(42.5)
         );
+    }
+
+    #[test]
+    fn parses_playlist_queue_progress() {
+        assert_eq!(
+            parse_ytdlp_playlist_progress("[download] Downloading item 3 of 12"),
+            Some(PlaylistProgress {
+                current: 3,
+                total: 12
+            })
+        );
+        assert_eq!(
+            parse_ytdlp_playlist_progress("[download] Downloading video 2 of 5"),
+            Some(PlaylistProgress {
+                current: 2,
+                total: 5
+            })
+        );
+        assert_eq!(parse_ytdlp_playlist_progress("[download] 42.0%"), None);
     }
 
     #[test]

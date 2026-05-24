@@ -8,12 +8,15 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    config::{cycle_index, default_output_dir, FORMATS, MAX_LOG_LINES, RESOLUTIONS},
+    config::{
+        cycle_index, default_output_dir, default_output_dir_input, expand_output_dir, FORMATS,
+        MAX_LOG_LINES, RESOLUTIONS,
+    },
     job::{run_download_job, JobConfig},
     media::{load_available_formats_with_control, looks_like_playlist_only_url},
     process_control::ProcessControl,
     system::open_output_dir,
-    types::{AvailableFormat, EncoderMode, Focus, Progress, Screen, WorkerEvent},
+    types::{AvailableFormat, EncoderMode, Focus, PlaylistProgress, Progress, Screen, WorkerEvent},
 };
 
 pub struct App {
@@ -27,7 +30,9 @@ pub struct App {
     pub formats_loading: bool,
     pub convert: bool,
     pub encoder_mode: EncoderMode,
+    pub output_dir_input: String,
     pub output_dir: PathBuf,
+    pub playlist_progress: Option<PlaylistProgress>,
     pub logs: VecDeque<String>,
     pub progress: Option<Progress>,
     pub status: String,
@@ -51,7 +56,9 @@ impl Default for App {
             formats_loading: false,
             convert: true,
             encoder_mode: EncoderMode::default(),
+            output_dir_input: default_output_dir_input(),
             output_dir: default_output_dir(),
+            playlist_progress: None,
             logs: VecDeque::new(),
             progress: None,
             status: "Paste a video or playlist URL.".to_string(),
@@ -104,6 +111,7 @@ impl App {
             match event {
                 WorkerEvent::Log(line) => self.push_log(line),
                 WorkerEvent::Progress(progress) => self.progress = Some(progress),
+                WorkerEvent::Playlist(progress) => self.playlist_progress = Some(progress),
                 WorkerEvent::Done { success, message } => {
                     self.result_success = Some(success);
                     self.status = message.clone();
@@ -154,7 +162,8 @@ impl App {
 
     fn handle_form_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return true,
+            KeyCode::Esc => return true,
+            KeyCode::Char('q') if !matches!(self.focus, Focus::Url | Focus::Output) => return true,
             KeyCode::Tab | KeyCode::Down => self.focus = self.focus.next(),
             KeyCode::BackTab | KeyCode::Up => self.focus = self.focus.previous(),
             KeyCode::Enter => {
@@ -166,7 +175,9 @@ impl App {
                     self.focus = self.focus.next();
                 }
             }
-            KeyCode::Char('f') if self.focus != Focus::Url => self.load_formats(),
+            KeyCode::Char('f') if !matches!(self.focus, Focus::Url | Focus::Output) => {
+                self.load_formats()
+            }
             KeyCode::Left => self.adjust_selection(-1),
             KeyCode::Right => self.adjust_selection(1),
             KeyCode::Char(' ') if self.focus == Focus::Convert => self.convert = !self.convert,
@@ -174,9 +185,17 @@ impl App {
                 self.url.pop();
                 self.clear_loaded_formats();
             }
+            KeyCode::Backspace if self.focus == Focus::Output => {
+                self.output_dir_input.pop();
+                self.status = "Output directory changed.".to_string();
+            }
             KeyCode::Char(ch) if self.focus == Focus::Url => {
                 self.url.push(ch);
                 self.clear_loaded_formats();
+            }
+            KeyCode::Char(ch) if self.focus == Focus::Output => {
+                self.output_dir_input.push(ch);
+                self.status = "Output directory changed.".to_string();
             }
             _ => {}
         }
@@ -252,6 +271,15 @@ impl App {
             return;
         }
 
+        let output_dir = match expand_output_dir(&self.output_dir_input) {
+            Ok(path) => path,
+            Err(error) => {
+                self.status = error;
+                self.focus = Focus::Output;
+                return;
+            }
+        };
+
         self.cancel_format_loading();
 
         self.logs.clear();
@@ -261,12 +289,13 @@ impl App {
             detail: "Starting yt-dlp...".to_string(),
         });
         self.status = "Download started.".to_string();
+        self.output_dir = output_dir.clone();
+        self.playlist_progress = None;
         self.result_success = None;
         self.screen = Screen::Running;
 
         let resolution = RESOLUTIONS[self.resolution_idx].to_string();
         let format = FORMATS[self.format_idx].to_string();
-        let output_dir = self.output_dir.clone();
         let convert = self.convert;
         let encoder_mode = self.encoder_mode;
         let selected_source_format = self.selected_source_format().cloned();

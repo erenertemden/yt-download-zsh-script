@@ -13,6 +13,7 @@ pub enum Focus {
     Format,
     Convert,
     Encoder,
+    Output,
     Start,
 }
 
@@ -24,7 +25,8 @@ impl Focus {
             Self::Resolution => Self::Format,
             Self::Format => Self::Convert,
             Self::Convert => Self::Encoder,
-            Self::Encoder => Self::Start,
+            Self::Encoder => Self::Output,
+            Self::Output => Self::Start,
             Self::Start => Self::Url,
         }
     }
@@ -37,7 +39,8 @@ impl Focus {
             Self::Format => Self::Resolution,
             Self::Convert => Self::Format,
             Self::Encoder => Self::Convert,
-            Self::Start => Self::Encoder,
+            Self::Output => Self::Encoder,
+            Self::Start => Self::Output,
         }
     }
 }
@@ -91,9 +94,16 @@ pub struct Progress {
     pub detail: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlaylistProgress {
+    pub current: usize,
+    pub total: usize,
+}
+
 #[derive(Debug)]
 pub enum WorkerEvent {
     Log(String),
     Progress(Progress),
+    Playlist(PlaylistProgress),
     Done { success: bool, message: String },
 }
