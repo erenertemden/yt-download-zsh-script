@@ -10,7 +10,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{
     config::{cycle_index, default_output_dir, FORMATS, MAX_LOG_LINES, RESOLUTIONS},
     job::{run_download_job, JobConfig},
-    media::load_available_formats,
+    media::{load_available_formats_with_control, looks_like_playlist_only_url},
+    process_control::ProcessControl,
     system::open_output_dir,
     types::{AvailableFormat, EncoderMode, Focus, Progress, Screen, WorkerEvent},
 };
@@ -32,7 +33,9 @@ pub struct App {
     pub status: String,
     pub result_success: Option<bool>,
     worker_rx: Option<Receiver<WorkerEvent>>,
+    worker_control: Option<ProcessControl>,
     format_rx: Option<Receiver<Result<Vec<AvailableFormat>, String>>>,
+    format_control: Option<ProcessControl>,
 }
 
 impl Default for App {
@@ -54,7 +57,9 @@ impl Default for App {
             status: "Paste a video or playlist URL.".to_string(),
             result_success: None,
             worker_rx: None,
+            worker_control: None,
             format_rx: None,
+            format_control: None,
         }
     }
 }
@@ -62,7 +67,11 @@ impl Default for App {
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            return self.screen != Screen::Running;
+            if self.screen == Screen::Running {
+                self.request_cancel();
+                return false;
+            }
+            return true;
         }
 
         match self.screen {
@@ -101,6 +110,7 @@ impl App {
                     self.push_log(message);
                     self.screen = Screen::Done;
                     self.worker_rx = None;
+                    self.worker_control = None;
                 }
             }
         }
@@ -111,6 +121,7 @@ impl App {
             self.push_log("Worker stopped unexpectedly.");
             self.screen = Screen::Done;
             self.worker_rx = None;
+            self.worker_control = None;
         }
     }
 
@@ -176,7 +187,7 @@ impl App {
     fn handle_running_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
-                self.push_log("Download is running; wait for completion before quitting.");
+                self.request_cancel();
             }
             _ => {}
         }
@@ -235,6 +246,14 @@ impl App {
             return;
         }
 
+        if self.selected_source_format().is_some() && looks_like_playlist_only_url(&url) {
+            self.status =
+                "Source Format is single-video only. Use Auto best for playlist URLs.".to_string();
+            return;
+        }
+
+        self.cancel_format_loading();
+
         self.logs.clear();
         self.progress = Some(Progress {
             stage: "Preparing".to_string(),
@@ -251,6 +270,8 @@ impl App {
         let convert = self.convert;
         let encoder_mode = self.encoder_mode;
         let selected_source_format = self.selected_source_format().cloned();
+        let control = ProcessControl::new();
+        let job_control = control.clone();
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
@@ -264,11 +285,13 @@ impl App {
                     convert,
                     encoder_mode,
                     selected_source_format,
+                    control: job_control,
                 },
             );
         });
 
         self.worker_rx = Some(rx);
+        self.worker_control = Some(control);
     }
 
     fn push_log(&mut self, line: impl Into<String>) {
@@ -290,18 +313,21 @@ impl App {
                 self.source_format_idx = 0;
                 self.formats_loading = false;
                 self.format_rx = None;
+                self.format_control = None;
                 self.status =
                     format!("Loaded {count} available formats. Use Left/Right on Source Format.");
             }
             Ok(Err(error)) => {
                 self.formats_loading = false;
                 self.format_rx = None;
+                self.format_control = None;
                 self.status = error;
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.formats_loading = false;
                 self.format_rx = None;
+                self.format_control = None;
                 self.status = "Format loading stopped unexpectedly.".to_string();
             }
         }
@@ -313,18 +339,27 @@ impl App {
             self.status = "URL is required before loading formats.".to_string();
             return;
         }
+        if looks_like_playlist_only_url(&url) {
+            self.status =
+                "Exact source format loading is single-video only. Use Auto best for playlists."
+                    .to_string();
+            return;
+        }
         if self.formats_loading {
             self.status = "Formats are already loading.".to_string();
             return;
         }
 
         let (tx, rx) = mpsc::channel();
+        let control = ProcessControl::new();
+        let format_control = control.clone();
         self.formats_loading = true;
         self.format_rx = Some(rx);
+        self.format_control = Some(control);
         self.status = "Loading available formats with yt-dlp...".to_string();
 
         thread::spawn(move || {
-            let _ = tx.send(load_available_formats(&url));
+            let _ = tx.send(load_available_formats_with_control(&url, &format_control));
         });
     }
 
@@ -341,9 +376,53 @@ impl App {
             return;
         }
 
+        if self.formats_loading {
+            if let Some(control) = self.format_control.as_ref() {
+                control.cancel();
+            }
+            self.status = "URL changed; format loading cancelled.".to_string();
+        } else {
+            self.status = "URL changed; load formats again if needed.".to_string();
+        }
+
         self.available_formats.clear();
         self.source_format_idx = 0;
         self.formats_loading = false;
         self.format_rx = None;
+        self.format_control = None;
+    }
+
+    fn cancel_format_loading(&mut self) {
+        if !self.formats_loading {
+            return;
+        }
+
+        if let Some(control) = self.format_control.as_ref() {
+            control.cancel();
+        }
+        self.formats_loading = false;
+        self.format_rx = None;
+        self.format_control = None;
+    }
+
+    fn request_cancel(&mut self) {
+        let Some(control) = self.worker_control.as_ref() else {
+            self.push_log("No running process to cancel.");
+            return;
+        };
+
+        if control.cancel() {
+            self.status = "Cancellation requested.".to_string();
+            self.push_log("Cancellation requested. Stopping the active process...");
+        } else {
+            self.status = "Cancellation already requested.".to_string();
+        }
+
+        let ratio = self.progress.as_ref().and_then(|progress| progress.ratio);
+        self.progress = Some(Progress {
+            stage: "Cancelling".to_string(),
+            ratio,
+            detail: "Waiting for the active process to stop...".to_string(),
+        });
     }
 }

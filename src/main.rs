@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod job;
 mod media;
+mod process_control;
 mod system;
 mod terminal;
 mod types;

@@ -1,32 +1,83 @@
 use std::{
     collections::HashSet,
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
     time::SystemTime,
 };
 
 use serde_json::Value;
 
-use crate::types::{AvailableFormat, EncoderMode, Progress};
+use crate::{
+    process_control::{shared_child, wait_for_child, ProcessControl},
+    types::{AvailableFormat, EncoderMode, Progress},
+};
 
-pub fn load_available_formats(url: &str) -> Result<Vec<AvailableFormat>, String> {
-    let output = Command::new("yt-dlp")
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mov", "webm", "mkv", "flv", "avi", "ts", "m2ts",
+];
+
+pub fn load_available_formats_with_control(
+    url: &str,
+    control: &ProcessControl,
+) -> Result<Vec<AvailableFormat>, String> {
+    if looks_like_playlist_only_url(url) {
+        return Err(
+            "Exact source format loading is single-video only. Use Auto best for playlist URLs."
+                .to_string(),
+        );
+    }
+
+    let mut command = Command::new("yt-dlp");
+    command
         .arg("-J")
         .arg("--no-playlist")
         .arg(url)
-        .output()
-        .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
+    let child = shared_child(child);
+    control.set_child(child.clone());
+
+    let (stdout, stderr) = match take_child_output(&child, "yt-dlp") {
+        Ok(output) => output,
+        Err(error) => {
+            control.cancel();
+            control.clear_child();
+            return Err(error);
+        }
+    };
+    let stdout_reader = read_pipe(stdout);
+    let stderr_reader = read_pipe(stderr);
+
+    let status = wait_for_child(&child, control, "yt-dlp");
+    if status.is_err() {
+        control.cancel();
+    }
+    control.clear_child();
+
+    let stdout = join_reader(stdout_reader, "yt-dlp stdout")?;
+    let stderr = join_reader(stderr_reader, "yt-dlp stderr")?;
+    let status = status?;
+
+    if control.is_cancelled() {
+        return Err("Format loading cancelled.".to_string());
+    }
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         return Err(format!(
             "Could not load formats: {}",
             stderr.trim().lines().last().unwrap_or("yt-dlp failed")
         ));
     }
 
-    let value: Value = serde_json::from_slice(&output.stdout)
+    let value: Value = serde_json::from_slice(&stdout)
         .map_err(|error| format!("Could not parse yt-dlp JSON: {error}"))?;
     let formats = extract_format_values(&value)
         .ok_or_else(|| "yt-dlp did not return a format list for this URL.".to_string())?;
@@ -65,9 +116,9 @@ pub fn format_selector(_format: &str, resolution: &str) -> String {
 
 pub fn selected_format_selector(format: &AvailableFormat) -> String {
     if format.has_audio {
-        format!("{}/best", format.id)
+        format.id.clone()
     } else {
-        format!("{}+bestaudio/best", format.id)
+        format!("{}+bestaudio", format.id)
     }
 }
 
@@ -141,8 +192,8 @@ pub fn format_duration(seconds: f64) -> String {
     }
 }
 
-pub fn snapshot_files(dir: &Path, ext: &str) -> HashSet<PathBuf> {
-    read_files_with_extension(dir, ext)
+pub fn snapshot_media_files(dir: &Path) -> HashSet<PathBuf> {
+    read_media_files(dir)
         .unwrap_or_default()
         .into_iter()
         .collect()
@@ -150,11 +201,10 @@ pub fn snapshot_files(dir: &Path, ext: &str) -> HashSet<PathBuf> {
 
 pub fn new_downloaded_files(
     dir: &Path,
-    ext: &str,
     before: &HashSet<PathBuf>,
     started_at: SystemTime,
 ) -> Vec<PathBuf> {
-    let mut files = read_files_with_extension(dir, ext).unwrap_or_default();
+    let mut files = read_media_files(dir).unwrap_or_default();
     files.retain(|path| {
         if !before.contains(path) {
             return true;
@@ -254,18 +304,14 @@ fn parse_available_format(value: &Value) -> Option<AvailableFormat> {
     let fps_label = fps.map(format_fps);
     let codec = short_codec(vcodec);
     let size = format_size(value);
-    let audio = if has_audio {
-        "with audio"
-    } else {
-        "video-only"
-    };
+    let audio = if has_audio { "audio" } else { "video-only" };
     let quality = match (height, fps_label.as_deref()) {
         (Some(height), Some(fps)) => format!("{height}p{fps}"),
         (Some(height), None) => format!("{height}p"),
         (None, Some(fps)) => format!("{fps}fps"),
         (None, None) => "unknown".to_string(),
     };
-    let mut label = format!("{quality} {ext} {codec} {audio} id={id}");
+    let mut label = format!("{quality} {ext} {codec} {audio} #{id}");
     if let Some(size) = size {
         label.push_str(&format!(" {size}"));
     }
@@ -349,7 +395,68 @@ fn parse_hms_time(value: &str) -> Option<f64> {
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
-fn read_files_with_extension(dir: &Path, ext: &str) -> io::Result<Vec<PathBuf>> {
+fn take_child_output(
+    child: &crate::process_control::SharedChild,
+    process_name: &str,
+) -> Result<(std::process::ChildStdout, std::process::ChildStderr), String> {
+    let mut child = child
+        .lock()
+        .map_err(|_| format!("{process_name} process lock was poisoned."))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("Could not capture {process_name} stdout."))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("Could not capture {process_name} stderr."))?;
+    Ok((stdout, stderr))
+}
+
+fn read_pipe<R>(mut reader: R) -> thread::JoinHandle<io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_reader(
+    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    reader
+        .join()
+        .map_err(|_| format!("{name} reader stopped unexpectedly."))?
+        .map_err(|error| format!("Could not read {name}: {error}"))
+}
+
+pub fn looks_like_playlist_only_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("youtube.com/playlist") || lower.contains("music.youtube.com/playlist") {
+        return true;
+    }
+
+    has_query_param(url, "list") && !has_query_param(url, "v") && !lower.contains("youtu.be/")
+}
+
+fn has_query_param(url: &str, key: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    let query = query.split('#').next().unwrap_or(query);
+
+    query.split('&').any(|part| {
+        part.split_once('=')
+            .map_or(part, |(name, _)| name)
+            .eq_ignore_ascii_case(key)
+    })
+}
+
+fn read_media_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if !dir.exists() {
         return Ok(files);
@@ -358,12 +465,7 @@ fn read_files_with_extension(dir: &Path, ext: &str) -> io::Result<Vec<PathBuf>> 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file()
-            && path
-                .extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value.eq_ignore_ascii_case(ext))
-        {
+        if path.is_file() && is_media_file(&path) {
             files.push(path);
         }
     }
@@ -371,10 +473,26 @@ fn read_files_with_extension(dir: &Path, ext: &str) -> io::Result<Vec<PathBuf>> 
     Ok(files)
 }
 
+fn is_media_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            VIDEO_EXTENSIONS
+                .iter()
+                .any(|extension| value.eq_ignore_ascii_case(extension))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::{
+        fs,
+        path::PathBuf,
+        thread,
+        time::{Duration, SystemTime},
+    };
 
     #[test]
     fn parses_ytdlp_percent() {
@@ -417,7 +535,7 @@ mod tests {
         assert_eq!(format.height, Some(1080));
         assert_eq!(format.fps_label.as_deref(), Some("60"));
         assert!(!format.has_audio);
-        assert_eq!(selected_format_selector(&format), "299+bestaudio/best");
+        assert_eq!(selected_format_selector(&format), "299+bestaudio");
     }
 
     #[test]
@@ -434,6 +552,53 @@ mod tests {
         let format = parse_available_format(&value).expect("format should parse");
 
         assert!(format.has_audio);
-        assert_eq!(selected_format_selector(&format), "18/best");
+        assert_eq!(selected_format_selector(&format), "18");
+    }
+
+    #[test]
+    fn detects_new_downloaded_media_with_source_extension() {
+        let dir = unique_test_dir("media-discovery");
+        fs::create_dir_all(&dir).expect("test dir should be created");
+        let old_file = dir.join("old.mp4");
+        fs::write(&old_file, b"old").expect("old file should be written");
+
+        let before = snapshot_media_files(&dir);
+        let started_at = SystemTime::now();
+        thread::sleep(Duration::from_millis(20));
+
+        let new_file = dir.join("source-format.webm");
+        fs::write(&new_file, b"new").expect("new file should be written");
+
+        let files = new_downloaded_files(&dir, &before, started_at);
+
+        assert_eq!(files, vec![new_file]);
+        fs::remove_dir_all(&dir).expect("test dir should be removed");
+    }
+
+    #[test]
+    fn detects_playlist_only_urls() {
+        assert!(looks_like_playlist_only_url(
+            "https://www.youtube.com/playlist?list=PL123"
+        ));
+        assert!(looks_like_playlist_only_url(
+            "https://www.youtube.com/watch?list=PL123"
+        ));
+        assert!(!looks_like_playlist_only_url(
+            "https://www.youtube.com/watch?v=abc&list=PL123"
+        ));
+        assert!(!looks_like_playlist_only_url(
+            "https://youtu.be/abc?list=PL123"
+        ));
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "yt-download-tui-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ))
     }
 }

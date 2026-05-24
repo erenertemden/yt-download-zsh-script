@@ -10,13 +10,19 @@ The goal is a simple Terminal.app workflow: paste a URL, choose quality, downloa
 
 ## Quick Start
 
-Install dependencies:
+Install with one command on macOS:
 
 ```bash
-brew install rust yt-dlp ffmpeg
+brew install rust yt-dlp ffmpeg && cargo install --git https://github.com/erenertemden/yt-download-zsh-script
 ```
 
-Clone and run:
+Then run:
+
+```bash
+yt-download-tui
+```
+
+For local development, clone and run from source:
 
 ```bash
 git clone https://github.com/erenertemden/yt-download-zsh-script.git
@@ -34,7 +40,7 @@ Downloads are saved to:
 
 ## Current Status
 
-This is currently a source-based Rust app. There is not yet a Homebrew formula, GitHub release binary, or `cargo install` package.
+This is currently a Rust app that can be installed from Git with `cargo install --git`. There is not yet a Homebrew formula, GitHub release binary, or crates.io package.
 
 Current MVP features:
 
@@ -46,6 +52,7 @@ Current MVP features:
 - Encoder selection for fast Apple hardware encoding or smaller CPU x264 output
 - Live `yt-dlp` / `ffmpeg` logs
 - Download and conversion progress when the tools report timing output
+- Cancel support for the active `yt-dlp` or `ffmpeg` process
 - Result screen with new-download and open-folder actions
 
 ---
@@ -95,6 +102,7 @@ Controls:
 - `Enter`: confirm/start, or start a new download on the result screen
 - `o`: open output folder on the result screen
 - `q`, `Esc`: quit when idle
+- `q`, `Esc`, `Ctrl-C`: cancel the active process while a download or conversion is running
 
 Basic flow:
 
@@ -119,12 +127,12 @@ Basic flow:
 Important playlist behavior:
 
 - Leave `Source Format` on `Auto best` for playlist downloads.
-- If you select a loaded source format, the download runs in single-video mode.
+- If you select a loaded source format, the download runs in single-video mode and playlist-only URLs are rejected before starting.
 - Loaded formats are scoped to the current single URL lookup, not every item in a playlist.
 
 Loading formats is optional. If you never press `f`, the app still downloads through the `Auto best` flow.
 
-If the selected source format is video-only, the app combines it with `bestaudio`. If a selected combined format is unavailable at download time, the selector falls back to `best`.
+If the selected source format is video-only, the app combines it with `bestaudio`. Exact source format mode does not silently fall back to `best`; if the selected format is no longer available, `yt-dlp` fails and the app reports the error.
 
 ---
 
@@ -138,6 +146,8 @@ fixed-original-title.mp4
 ```
 
 The converted file uses H.264 video and AAC audio in an `.mp4` container, which is the safest default for QuickTime Player on macOS.
+
+Conversion runs only against newly downloaded or newly modified media files in the output folder. If `yt-dlp` finishes but no new media file can be found, the app reports that as a failure instead of showing a false successful conversion.
 
 Encoder modes:
 
@@ -162,6 +172,13 @@ The app may also work on Linux because Ratatui, `yt-dlp`, and `ffmpeg` are cross
 
 ## Build
 
+Install the latest version directly from the Git repository:
+
+```bash
+cargo install --git https://github.com/erenertemden/yt-download-zsh-script
+yt-download-tui
+```
+
 Build a release binary:
 
 ```bash
@@ -181,7 +198,6 @@ yt-download-tui
 ## Known Limitations
 
 - Output directory is fixed.
-- Running downloads cannot be cancelled from inside the TUI yet.
 - Playlist items are shown through logs, not as a structured queue yet.
 - Playlist-wide per-item format selection is not structured yet.
 - Installers and prebuilt release binaries are not available yet.
@@ -218,7 +234,7 @@ Useful next improvements:
 
 - Dependency check screen for missing `yt-dlp` or `ffmpeg`
 - Configurable output directory
-- Cancel/retry support
+- Retry support
 - Structured playlist queue
 - Dedicated format list view with search/filtering
 - GitHub Actions release builds for Apple Silicon and Intel Macs

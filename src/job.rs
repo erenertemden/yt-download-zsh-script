@@ -12,8 +12,9 @@ use crate::{
     media::{
         append_video_encoder_args, effective_encoder_mode, fixed_mp4_path, format_duration,
         format_selector, new_downloaded_files, parse_ffmpeg_out_time, parse_ytdlp_progress,
-        probe_duration, selected_format_selector, snapshot_files,
+        probe_duration, selected_format_selector, snapshot_media_files,
     },
+    process_control::{shared_child, wait_for_child, ProcessControl, SharedChild},
     types::{AvailableFormat, EncoderMode, Progress, WorkerEvent},
 };
 
@@ -26,6 +27,7 @@ pub struct JobConfig {
     pub convert: bool,
     pub encoder_mode: EncoderMode,
     pub selected_source_format: Option<AvailableFormat>,
+    pub control: ProcessControl,
 }
 
 pub fn run_download_job(tx: Sender<WorkerEvent>, config: JobConfig) {
@@ -42,13 +44,17 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
         .map_err(|error| format!("Could not create output directory: {error}"))?;
 
     let started_at = SystemTime::now();
-    let before = snapshot_files(&config.output_dir, &config.format);
+    let before = snapshot_media_files(&config.output_dir);
 
     send_log(tx, format!("Output: {}", config.output_dir.display()));
     send_log(tx, format!("Resolution: {}", config.resolution));
     send_log(tx, format!("Format: {}", config.format));
     if let Some(format) = config.selected_source_format.as_ref() {
         send_log(tx, format!("Source format: {}", format.label));
+        send_log(
+            tx,
+            "Exact source format mode: single video, no best fallback.",
+        );
     }
     if config.convert {
         send_log(tx, format!("Encoder: {}", config.encoder_mode.label()));
@@ -80,17 +86,34 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
         .arg(output_template)
         .arg(&config.url);
 
-    let mut child = command
+    if config.control.is_cancelled() {
+        return Err("Cancelled.".to_string());
+    }
+
+    let child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
+    let child = shared_child(child);
+    config.control.set_child(child.clone());
 
-    stream_child_output(&mut child, Sender::clone(tx), OutputKind::YtDlp)?;
+    if let Err(error) = stream_child_output(&child, Sender::clone(tx), OutputKind::YtDlp) {
+        config.control.cancel();
+        config.control.clear_child();
+        return Err(error);
+    }
 
-    let status = child
-        .wait()
-        .map_err(|error| format!("yt-dlp failed to finish: {error}"))?;
+    let status = wait_for_child(&child, &config.control, "yt-dlp");
+    if status.is_err() {
+        config.control.cancel();
+    }
+    config.control.clear_child();
+    let status = status?;
+
+    if config.control.is_cancelled() {
+        return Err("Cancelled.".to_string());
+    }
 
     if !status.success() {
         return Err(format!("yt-dlp exited with status: {status}"));
@@ -99,8 +122,8 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
     send_log(tx, "Download completed.");
 
     if config.convert {
-        let files = new_downloaded_files(&config.output_dir, &config.format, &before, started_at);
-        convert_files(tx, files, config.encoder_mode)?;
+        let files = new_downloaded_files(&config.output_dir, &before, started_at);
+        convert_files(tx, files, config.encoder_mode, &config.control)?;
     }
 
     let message = if config.convert {
@@ -117,10 +140,13 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
 }
 
 fn stream_child_output(
-    child: &mut std::process::Child,
+    child: &SharedChild,
     tx: Sender<WorkerEvent>,
     kind: OutputKind,
 ) -> Result<(), String> {
+    let mut child = child
+        .lock()
+        .map_err(|_| "Process lock was poisoned.".to_string())?;
     let stdout = child
         .stdout
         .take()
@@ -169,13 +195,13 @@ fn convert_files(
     tx: &Sender<WorkerEvent>,
     files: Vec<PathBuf>,
     encoder_mode: EncoderMode,
+    control: &ProcessControl,
 ) -> Result<(), String> {
     if files.is_empty() {
-        send_log(
-            tx,
-            "No new files matched the selected format; skipping conversion.",
+        send_log(tx, "No new media files were found after download.");
+        return Err(
+            "Download completed, but no new media files were found to convert.".to_string(),
         );
-        return Ok(());
     }
 
     let requested_encoder_mode = encoder_mode;
@@ -189,6 +215,10 @@ fn convert_files(
     send_log(tx, format!("Converting with {}", encoder_mode.label()));
 
     for (index, file) in files.iter().enumerate() {
+        if control.is_cancelled() {
+            return Err("Cancelled.".to_string());
+        }
+
         let output = fixed_mp4_path(file);
         let detail = format!(
             "{} -> {}",
@@ -227,7 +257,7 @@ fn convert_files(
             .arg(file);
         append_video_encoder_args(&mut command, encoder_mode);
 
-        let mut child = command
+        let child = command
             .arg("-c:a")
             .arg("aac")
             .arg("-b:a")
@@ -239,9 +269,11 @@ fn convert_files(
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Could not start ffmpeg: {error}"))?;
+        let child = shared_child(child);
+        control.set_child(child.clone());
 
-        stream_ffmpeg_output(
-            &mut child,
+        if let Err(error) = stream_ffmpeg_output(
+            &child,
             Sender::clone(tx),
             FfmpegProgressContext {
                 file_index: index,
@@ -249,11 +281,22 @@ fn convert_files(
                 duration_secs,
                 detail,
             },
-        )?;
+        ) {
+            control.cancel();
+            control.clear_child();
+            return Err(error);
+        }
 
-        let status = child
-            .wait()
-            .map_err(|error| format!("ffmpeg failed to finish: {error}"))?;
+        let status = wait_for_child(&child, control, "ffmpeg");
+        if status.is_err() {
+            control.cancel();
+        }
+        control.clear_child();
+        let status = status?;
+
+        if control.is_cancelled() {
+            return Err("Cancelled.".to_string());
+        }
 
         if !status.success() {
             return Err(format!("ffmpeg exited with status: {status}"));
@@ -284,10 +327,13 @@ struct FfmpegProgressContext {
 }
 
 fn stream_ffmpeg_output(
-    child: &mut std::process::Child,
+    child: &SharedChild,
     tx: Sender<WorkerEvent>,
     context: FfmpegProgressContext,
 ) -> Result<(), String> {
+    let mut child = child
+        .lock()
+        .map_err(|_| "ffmpeg process lock was poisoned.".to_string())?;
     let stdout = child
         .stdout
         .take()

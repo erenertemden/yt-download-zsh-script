@@ -53,6 +53,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
+    let value_width = usize::from(area.width.saturating_sub(18));
     let rows = vec![
         selectable_line(
             app.focus == Focus::Url,
@@ -62,26 +63,31 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 &app.url
             },
+            value_width,
         ),
         selectable_line(
             app.focus == Focus::SourceFormat,
             "Source Format",
             app.source_format_label(),
+            value_width,
         ),
         selectable_line(
             app.focus == Focus::Resolution,
             "Fallback Res",
             app.resolution_label(),
+            value_width,
         ),
         selectable_line(
             app.focus == Focus::Format,
             "Container",
             FORMATS[app.format_idx],
+            value_width,
         ),
         selectable_line(
             app.focus == Focus::Convert,
             "QuickTime mp4",
             if app.convert { "enabled" } else { "disabled" },
+            value_width,
         ),
         selectable_line(
             app.focus == Focus::Encoder,
@@ -91,6 +97,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 "not used"
             },
+            value_width,
         ),
         selectable_line(
             false,
@@ -98,6 +105,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             app.output_dir
                 .to_str()
                 .unwrap_or("~/Downloads/youtube_downloads"),
+            value_width,
         ),
         Line::raw(""),
         button_line(app.focus == Focus::Start, "Start Download"),
@@ -183,7 +191,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "f load formats  Tab/Up/Down focus  Left/Right choose  Space toggle  Enter confirm/start  q quit"
         }
         Screen::Running => {
-            "Download is running. Logs update live; q/Esc is disabled until the job finishes."
+            "Download is running. Logs update live; q/Esc/Ctrl-C cancels the active process."
         }
         Screen::Done => "Enter/n new download  o open folder  q/Esc quit",
     };
@@ -193,7 +201,12 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(help, area);
 }
 
-fn selectable_line<'a>(selected: bool, label: &'a str, value: &'a str) -> Line<'a> {
+fn selectable_line(
+    selected: bool,
+    label: &str,
+    value: &str,
+    max_value_width: usize,
+) -> Line<'static> {
     let marker = if selected { "> " } else { "  " };
     let value_style = if selected {
         Style::default()
@@ -202,6 +215,7 @@ fn selectable_line<'a>(selected: bool, label: &'a str, value: &'a str) -> Line<'
     } else {
         Style::default().fg(Color::White)
     };
+    let value = truncate_middle(value, max_value_width);
 
     Line::from(vec![
         Span::raw(marker),
@@ -210,7 +224,7 @@ fn selectable_line<'a>(selected: bool, label: &'a str, value: &'a str) -> Line<'
     ])
 }
 
-fn button_line<'a>(selected: bool, label: &'a str) -> Line<'a> {
+fn button_line(selected: bool, label: &str) -> Line<'static> {
     let style = if selected {
         Style::default()
             .fg(Color::Black)
@@ -224,4 +238,33 @@ fn button_line<'a>(selected: bool, label: &'a str) -> Line<'a> {
         Span::raw(if selected { "> " } else { "  " }),
         Span::styled(format!("[ {label} ]"), style),
     ])
+}
+
+fn truncate_middle(value: &str, max_width: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_width {
+        return value.to_string();
+    }
+
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let keep = max_width - 3;
+    let left_count = keep / 2;
+    let right_count = keep - left_count;
+    let left: String = value.chars().take(left_count).collect();
+    let right: String = value
+        .chars()
+        .rev()
+        .take(right_count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    format!("{left}...{right}")
 }
