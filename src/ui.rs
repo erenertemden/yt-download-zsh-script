@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::App,
+    app::{App, DirectoryPicker},
     config::FORMATS,
     types::{Focus, Progress, Screen},
 };
@@ -27,6 +27,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.screen {
         Screen::Form => draw_form(frame, app, chunks[1]),
+        Screen::OutputPicker => draw_output_picker(frame, app, chunks[1]),
         Screen::Running => draw_running(frame, app, chunks[1]),
         Screen::Done => draw_done(frame, app, chunks[1]),
     }
@@ -165,6 +166,106 @@ fn draw_running(frame: &mut Frame, app: &App, area: Rect) {
     draw_logs(frame, app, chunks[2]);
 }
 
+fn draw_output_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(5)])
+        .split(area);
+
+    let Some(picker) = app.directory_picker.as_ref() else {
+        let paragraph = Paragraph::new("No folder picker is active.").block(
+            Block::default()
+                .title("Output Folder")
+                .borders(Borders::ALL),
+        );
+        frame.render_widget(paragraph, area);
+        return;
+    };
+
+    draw_output_picker_summary(frame, picker, chunks[0]);
+    draw_output_picker_entries(frame, picker, chunks[1]);
+}
+
+fn draw_output_picker_summary(frame: &mut Frame, picker: &DirectoryPicker, area: Rect) {
+    let mut rows = vec![
+        Line::from(vec![
+            Span::styled("Current  ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                picker.current_dir.display().to_string(),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Folders  ", Style::default().fg(Color::Gray)),
+            Span::raw(picker.entries.len().to_string()),
+        ]),
+    ];
+
+    if let Some(error) = picker.error.as_ref() {
+        rows.push(Line::styled(error.clone(), Style::default().fg(Color::Red)));
+    }
+
+    let paragraph = Paragraph::new(rows)
+        .block(
+            Block::default()
+                .title("Output Folder")
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_output_picker_entries(frame: &mut Frame, picker: &DirectoryPicker, area: Rect) {
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let start = scroll_start(picker.selected_idx, visible_rows, picker.entries.len());
+    let items = if picker.entries.is_empty() {
+        vec![ListItem::new(Line::styled(
+            "No folders found",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        picker
+            .entries
+            .iter()
+            .skip(start)
+            .take(visible_rows)
+            .enumerate()
+            .map(|(visible_index, entry)| {
+                let index = start + visible_index;
+                let selected = index == picker.selected_idx;
+                let marker = if selected { "> " } else { "  " };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::raw(marker),
+                    Span::styled(format!("{}/", entry.name), style),
+                ]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items).block(Block::default().title("Folders").borders(Borders::ALL));
+    frame.render_widget(list, area);
+}
+
+fn scroll_start(selected_idx: usize, visible_rows: usize, total_rows: usize) -> usize {
+    if visible_rows == 0 || total_rows <= visible_rows {
+        return 0;
+    }
+
+    let max_start = total_rows.saturating_sub(visible_rows);
+    selected_idx
+        .saturating_add(1)
+        .saturating_sub(visible_rows)
+        .min(max_start)
+}
+
 fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
     let (label, ratio) = if let Some(progress) = app.playlist_progress.as_ref() {
         let ratio = progress.current as f64 / progress.total.max(1) as f64;
@@ -225,7 +326,10 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.screen {
         Screen::Form => {
-            "Tab focus  [text] type  <choice> Left/Right  [x] Space  Enter start  Esc quit"
+            "Tab focus  Left/Right choices  Space toggle  Enter Output browse/start  Esc quit"
+        }
+        Screen::OutputPicker => {
+            "Up/Down choose  Enter open  Backspace parent  ~ home  Space/s select  Esc cancel"
         }
         Screen::Running => {
             "Download is running. Logs update live; q/Esc/Ctrl-C cancels the active process."

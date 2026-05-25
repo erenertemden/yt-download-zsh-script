@@ -101,7 +101,8 @@ Controls:
 - `f`: load available formats for the current URL
 - `Left`, `Right`: change source format, fallback resolution, container, or encoder mode
 - `Space`: toggle QuickTime conversion
-- `Enter`: confirm/start, or start a new download on the result screen
+- `Enter`: confirm/start, open the output folder picker when `Output` is focused, or start a new download on the result screen
+- Output folder picker: `Up`/`Down` choose a folder, `Enter` opens it, `Backspace` moves to the parent, `~` jumps home, `Space` or `s` selects the current folder, `Esc` cancels
 - `o`: open output folder on the result screen
 - `Esc`: quit when idle
 - `q`: quit when idle and not editing `URL` or `Output`

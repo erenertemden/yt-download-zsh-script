@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
-    path::PathBuf,
+    env, fs,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
 };
@@ -35,6 +36,7 @@ pub struct App {
     pub encoder_mode: EncoderMode,
     pub output_dir_input: String,
     pub output_dir: PathBuf,
+    pub directory_picker: Option<DirectoryPicker>,
     pub playlist_progress: Option<PlaylistProgress>,
     pub logs: VecDeque<String>,
     pub progress: Option<Progress>,
@@ -61,6 +63,7 @@ impl Default for App {
             encoder_mode: EncoderMode::default(),
             output_dir_input: default_output_dir_input(),
             output_dir: default_output_dir(),
+            directory_picker: None,
             playlist_progress: None,
             logs: VecDeque::new(),
             progress: None,
@@ -86,6 +89,7 @@ impl App {
 
         match self.screen {
             Screen::Form => self.handle_form_key(key),
+            Screen::OutputPicker => self.handle_output_picker_key(key),
             Screen::Running => self.handle_running_key(key),
             Screen::Done => self.handle_done_key(key),
         }
@@ -174,6 +178,8 @@ impl App {
                     self.start_download();
                 } else if self.focus == Focus::SourceFormat && self.available_formats.is_empty() {
                     self.load_formats();
+                } else if self.focus == Focus::Output {
+                    self.open_output_picker();
                 } else {
                     self.focus = self.focus.next();
                 }
@@ -237,6 +243,25 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn handle_output_picker_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_output_picker("Output picker cancelled.");
+            }
+            KeyCode::Up => self.adjust_output_picker_selection(-1),
+            KeyCode::Down => self.adjust_output_picker_selection(1),
+            KeyCode::PageUp => self.adjust_output_picker_selection(-10),
+            KeyCode::PageDown => self.adjust_output_picker_selection(10),
+            KeyCode::Backspace | KeyCode::Left => self.open_output_picker_parent(),
+            KeyCode::Enter | KeyCode::Right => self.open_selected_output_picker_entry(),
+            KeyCode::Char(' ') | KeyCode::Char('s') => self.select_output_picker_dir(),
+            KeyCode::Char('~') => self.open_output_picker_home(),
+            _ => {}
+        }
+
+        false
     }
 
     fn adjust_selection(&mut self, direction: isize) {
@@ -334,6 +359,84 @@ impl App {
 
         self.worker_rx = Some(rx);
         self.worker_control = Some(control);
+    }
+
+    fn open_output_picker(&mut self) {
+        let start_dir = self.output_picker_start_dir();
+        self.directory_picker = Some(DirectoryPicker::read(start_dir));
+        self.screen = Screen::OutputPicker;
+        self.status = "Browse folders; Space or s selects the current folder.".to_string();
+    }
+
+    fn output_picker_start_dir(&self) -> PathBuf {
+        expand_output_dir(&self.output_dir_input)
+            .ok()
+            .and_then(|path| existing_directory_or_parent(&absolute_path(path)))
+            .or_else(|| existing_directory_or_parent(&default_output_dir()))
+            .or_else(home_dir)
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn adjust_output_picker_selection(&mut self, direction: isize) {
+        let Some(picker) = self.directory_picker.as_mut() else {
+            return;
+        };
+
+        picker.selected_idx = cycle_index(picker.selected_idx, picker.entries.len(), direction);
+    }
+
+    fn open_selected_output_picker_entry(&mut self) {
+        let Some(path) = self
+            .directory_picker
+            .as_ref()
+            .and_then(|picker| picker.selected_entry_path())
+        else {
+            return;
+        };
+
+        self.directory_picker = Some(DirectoryPicker::read(path));
+    }
+
+    fn open_output_picker_parent(&mut self) {
+        let Some(parent) = self
+            .directory_picker
+            .as_ref()
+            .and_then(|picker| picker.current_dir.parent())
+            .map(Path::to_path_buf)
+        else {
+            return;
+        };
+
+        self.directory_picker = Some(DirectoryPicker::read(parent));
+    }
+
+    fn open_output_picker_home(&mut self) {
+        if let Some(home) = home_dir() {
+            self.directory_picker = Some(DirectoryPicker::read(home));
+        }
+    }
+
+    fn select_output_picker_dir(&mut self) {
+        let Some(path) = self
+            .directory_picker
+            .as_ref()
+            .map(|picker| picker.current_dir.clone())
+        else {
+            self.close_output_picker("Output picker cancelled.");
+            return;
+        };
+
+        self.output_dir_input = path.display().to_string();
+        self.output_dir = path;
+        self.close_output_picker("Output directory selected.");
+    }
+
+    fn close_output_picker(&mut self, status: &str) {
+        self.directory_picker = None;
+        self.screen = Screen::Form;
+        self.focus = Focus::Output;
+        self.status = status.to_string();
     }
 
     fn push_log(&mut self, line: impl Into<String>) {
@@ -467,4 +570,95 @@ impl App {
             detail: "Waiting for the active process to stop...".to_string(),
         });
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct DirectoryPicker {
+    pub current_dir: PathBuf,
+    pub entries: Vec<DirectoryEntry>,
+    pub selected_idx: usize,
+    pub error: Option<String>,
+}
+
+impl DirectoryPicker {
+    fn read(current_dir: PathBuf) -> Self {
+        let mut entries = Vec::new();
+        let mut error = None;
+
+        match fs::read_dir(&current_dir) {
+            Ok(read_dir) => {
+                for entry in read_dir {
+                    match entry {
+                        Ok(entry) if entry.path().is_dir() => {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            entries.push(DirectoryEntry {
+                                name,
+                                path: entry.path(),
+                            });
+                        }
+                        Ok(_) => {}
+                        Err(read_error) => {
+                            error = Some(format!("Could not read folder entry: {read_error}"));
+                        }
+                    }
+                }
+            }
+            Err(read_error) => {
+                error = Some(format!("Could not read folder: {read_error}"));
+            }
+        }
+
+        entries.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+        });
+
+        Self {
+            current_dir,
+            entries,
+            selected_idx: 0,
+            error,
+        }
+    }
+
+    fn selected_entry_path(&self) -> Option<PathBuf> {
+        self.entries
+            .get(self.selected_idx)
+            .map(|entry| entry.path.clone())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+fn absolute_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+
+    env::current_dir()
+        .map(|current_dir| current_dir.join(&path))
+        .unwrap_or(path)
+}
+
+fn existing_directory_or_parent(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.to_path_buf();
+
+    loop {
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+
+        if !candidate.pop() {
+            return None;
+        }
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var("HOME").ok().map(PathBuf::from)
 }
