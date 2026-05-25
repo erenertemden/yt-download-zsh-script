@@ -63,30 +63,39 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 &app.url
             },
+            FieldKind::Text,
             value_width,
         ),
         selectable_line(
             app.focus == Focus::SourceFormat,
             "Source Format",
             app.source_format_label(),
+            FieldKind::Choice,
             value_width,
         ),
         selectable_line(
             app.focus == Focus::Resolution,
             "Fallback Res",
             app.resolution_label(),
+            if app.source_format_idx == 0 {
+                FieldKind::Choice
+            } else {
+                FieldKind::ReadOnly
+            },
             value_width,
         ),
         selectable_line(
             app.focus == Focus::Format,
             "Container",
             FORMATS[app.format_idx],
+            FieldKind::Choice,
             value_width,
         ),
         selectable_line(
             app.focus == Focus::Convert,
             "QuickTime mp4",
             if app.convert { "enabled" } else { "disabled" },
+            FieldKind::Toggle(app.convert),
             value_width,
         ),
         selectable_line(
@@ -97,12 +106,18 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 "not used"
             },
+            if app.convert {
+                FieldKind::Choice
+            } else {
+                FieldKind::ReadOnly
+            },
             value_width,
         ),
         selectable_line(
             app.focus == Focus::Output,
             "Output",
             &app.output_dir_input,
+            FieldKind::Text,
             value_width,
         ),
         Line::raw(""),
@@ -210,7 +225,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.screen {
         Screen::Form => {
-            "f load formats  Tab/Up/Down focus  type URL/Output  Left/Right choose  Space toggle  Enter start  Esc quit"
+            "Tab focus  [text] type  <choice> Left/Right  [x] Space  Enter start  Esc quit"
         }
         Screen::Running => {
             "Download is running. Logs update live; q/Esc/Ctrl-C cancels the active process."
@@ -227,6 +242,7 @@ fn selectable_line(
     selected: bool,
     label: &str,
     value: &str,
+    kind: FieldKind,
     max_value_width: usize,
 ) -> Line<'static> {
     let marker = if selected { "> " } else { "  " };
@@ -237,13 +253,21 @@ fn selectable_line(
     } else {
         Style::default().fg(Color::White)
     };
-    let value = truncate_middle(value, max_value_width);
+    let value = format_field_value(value, kind, selected, max_value_width);
 
     Line::from(vec![
         Span::raw(marker),
         Span::styled(format!("{label:<14}"), Style::default().fg(Color::Gray)),
         Span::styled(value, value_style),
     ])
+}
+
+#[derive(Clone, Copy)]
+enum FieldKind {
+    Text,
+    Choice,
+    Toggle(bool),
+    ReadOnly,
 }
 
 fn button_line(selected: bool, label: &str) -> Line<'static> {
@@ -289,4 +313,29 @@ fn truncate_middle(value: &str, max_width: usize) -> String {
         .collect();
 
     format!("{left}...{right}")
+}
+
+fn format_field_value(value: &str, kind: FieldKind, selected: bool, max_width: usize) -> String {
+    match kind {
+        FieldKind::Text => {
+            let suffix = if selected { "_]" } else { "]" };
+            wrap_value(value, "[", suffix, max_width)
+        }
+        FieldKind::Choice => wrap_value(value, "< ", " >", max_width),
+        FieldKind::Toggle(checked) => {
+            let prefix = if checked { "[x] " } else { "[ ] " };
+            wrap_value(value, prefix, "", max_width)
+        }
+        FieldKind::ReadOnly => wrap_value(value, "( ", " )", max_width),
+    }
+}
+
+fn wrap_value(value: &str, prefix: &str, suffix: &str, max_width: usize) -> String {
+    let decoration_width = prefix.chars().count() + suffix.chars().count();
+    if max_width <= decoration_width {
+        return truncate_middle(&format!("{prefix}{value}{suffix}"), max_width);
+    }
+
+    let value = truncate_middle(value, max_width - decoration_width);
+    format!("{prefix}{value}{suffix}")
 }
