@@ -1,11 +1,8 @@
 use std::{
-    collections::HashSet,
-    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::SystemTime,
 };
 
 use serde_json::Value;
@@ -15,9 +12,7 @@ use crate::{
     types::{AvailableFormat, EncoderMode, PlaylistProgress, Progress},
 };
 
-const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "m4v", "mov", "webm", "mkv", "flv", "avi", "ts", "m2ts",
-];
+const DOWNLOADED_FILE_PREFIX: &str = "__YT_DOWNLOAD_TUI_FILE__:";
 
 pub fn load_available_formats_with_control(
     url: &str,
@@ -107,20 +102,75 @@ pub fn load_available_formats_with_control(
     Ok(rows)
 }
 
-pub fn format_selector(_format: &str, resolution: &str) -> String {
-    if resolution == "Best" {
-        "bestvideo+bestaudio/best".to_string()
-    } else {
-        format!("bestvideo[height<={resolution}]+bestaudio/best[height<={resolution}]")
+pub fn downloaded_file_print_template() -> String {
+    format!("after_move:{DOWNLOADED_FILE_PREFIX}%(filepath)s")
+}
+
+pub fn parse_downloaded_file_print(line: &str) -> Option<PathBuf> {
+    let path = line.strip_prefix(DOWNLOADED_FILE_PREFIX)?.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+pub fn format_selector(format: &str, resolution: &str) -> String {
+    let height_filter = height_filter(resolution);
+
+    match format {
+        "mp4" => [
+            format!("bestvideo[ext=mp4]{height_filter}+bestaudio[ext=m4a]"),
+            format!("best[ext=mp4]{height_filter}"),
+            format!("bestvideo{height_filter}[vcodec^=avc1]+bestaudio[ext=m4a]"),
+            format!("best{height_filter}[vcodec^=avc1]"),
+        ]
+        .join("/"),
+        "webm" => [
+            format!("bestvideo[ext=webm]{height_filter}+bestaudio[ext=webm]"),
+            format!("best[ext=webm]{height_filter}"),
+        ]
+        .join("/"),
+        _ => {
+            if resolution == "Best" {
+                "bestvideo+bestaudio/best".to_string()
+            } else {
+                format!("bestvideo[height<={resolution}]+bestaudio/best[height<={resolution}]")
+            }
+        }
     }
 }
 
-pub fn selected_format_selector(format: &AvailableFormat) -> String {
+pub fn selected_format_selector(format: &AvailableFormat, container: &str) -> String {
     if format.has_audio {
         format.id.clone()
     } else {
-        format!("{}+bestaudio", format.id)
+        audio_selectors_for_container(container)
+            .iter()
+            .map(|audio| format!("{}+{}", format.id, audio))
+            .collect::<Vec<_>>()
+            .join("/")
     }
+}
+
+pub fn selected_format_container_error(
+    format: &AvailableFormat,
+    container: &str,
+) -> Option<String> {
+    let compatible = match container {
+        "mp4" => {
+            is_mp4_compatible_video(&format.vcodec)
+                && (!format.has_audio || is_mp4_compatible_audio(&format.acodec))
+        }
+        "webm" => {
+            is_webm_compatible_video(&format.vcodec)
+                && (!format.has_audio || is_webm_compatible_audio(&format.acodec))
+        }
+        "mkv" => true,
+        _ => true,
+    };
+
+    (!compatible).then(|| {
+        format!(
+            "Selected source format is not compatible with {container}. Choose MKV or a compatible source format."
+        )
+    })
 }
 
 pub fn parse_ytdlp_progress(line: &str) -> Option<Progress> {
@@ -196,33 +246,6 @@ pub fn format_duration(seconds: f64) -> String {
     } else {
         format!("{minutes}:{seconds:02}")
     }
-}
-
-pub fn snapshot_media_files(dir: &Path) -> HashSet<PathBuf> {
-    read_media_files(dir)
-        .unwrap_or_default()
-        .into_iter()
-        .collect()
-}
-
-pub fn new_downloaded_files(
-    dir: &Path,
-    before: &HashSet<PathBuf>,
-    started_at: SystemTime,
-) -> Vec<PathBuf> {
-    let mut files = read_media_files(dir).unwrap_or_default();
-    files.retain(|path| {
-        if !before.contains(path) {
-            return true;
-        }
-
-        path.metadata()
-            .and_then(|metadata| metadata.modified())
-            .map(|modified| modified >= started_at)
-            .unwrap_or(false)
-    });
-    files.sort();
-    files
 }
 
 pub fn fixed_mp4_path(input: &Path) -> PathBuf {
@@ -326,10 +349,66 @@ fn parse_available_format(value: &Value) -> Option<AvailableFormat> {
         id,
         label,
         ext,
+        vcodec: vcodec.to_string(),
+        acodec: acodec.to_string(),
         height,
         fps_label,
         has_audio,
     })
+}
+
+fn height_filter(resolution: &str) -> String {
+    if resolution == "Best" {
+        String::new()
+    } else {
+        format!("[height<={resolution}]")
+    }
+}
+
+fn audio_selectors_for_container(container: &str) -> &'static [&'static str] {
+    match container {
+        "mp4" => &[
+            "bestaudio[ext=m4a]",
+            "bestaudio[acodec^=mp4a]",
+            "bestaudio[acodec^=aac]",
+        ],
+        "webm" => &[
+            "bestaudio[ext=webm]",
+            "bestaudio[acodec=opus]",
+            "bestaudio[acodec=vorbis]",
+        ],
+        _ => &["bestaudio"],
+    }
+}
+
+fn is_mp4_compatible_video(codec: &str) -> bool {
+    let codec = codec.to_ascii_lowercase();
+    codec.starts_with("avc1")
+        || codec.starts_with("h264")
+        || codec.starts_with("hev1")
+        || codec.starts_with("hvc1")
+        || codec.starts_with("h265")
+        || codec.starts_with("av01")
+}
+
+fn is_mp4_compatible_audio(codec: &str) -> bool {
+    let codec = codec.to_ascii_lowercase();
+    codec == "none"
+        || codec.starts_with("mp4a")
+        || codec.starts_with("aac")
+        || codec.starts_with("alac")
+        || codec.starts_with("ac-3")
+        || codec.starts_with("ec-3")
+}
+
+fn is_webm_compatible_video(codec: &str) -> bool {
+    let codec = codec.to_ascii_lowercase();
+    codec.starts_with("vp8") || codec.starts_with("vp9") || codec.starts_with("av01")
+}
+
+fn is_webm_compatible_audio(codec: &str) -> bool {
+    let codec = codec.to_ascii_lowercase();
+    codec == "none" || codec.starts_with("opus") || codec.starts_with("vorbis")
 }
 
 fn compare_optional_fps(left: &Option<String>, right: &Option<String>) -> std::cmp::Ordering {
@@ -492,43 +571,11 @@ fn has_query_param(url: &str, key: &str) -> bool {
     })
 }
 
-fn read_media_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    if !dir.exists() {
-        return Ok(files);
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && is_media_file(&path) {
-            files.push(path);
-        }
-    }
-
-    Ok(files)
-}
-
-fn is_media_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| {
-            VIDEO_EXTENSIONS
-                .iter()
-                .any(|extension| value.eq_ignore_ascii_case(extension))
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::{
-        fs,
-        path::PathBuf,
-        thread,
-        time::{Duration, SystemTime},
-    };
+    use std::path::PathBuf;
 
     #[test]
     fn parses_ytdlp_percent() {
@@ -590,7 +637,11 @@ mod tests {
         assert_eq!(format.height, Some(1080));
         assert_eq!(format.fps_label.as_deref(), Some("60"));
         assert!(!format.has_audio);
-        assert_eq!(selected_format_selector(&format), "299+bestaudio");
+        assert_eq!(selected_format_selector(&format, "mkv"), "299+bestaudio");
+        assert_eq!(
+            selected_format_selector(&format, "mp4"),
+            "299+bestaudio[ext=m4a]/299+bestaudio[acodec^=mp4a]/299+bestaudio[acodec^=aac]"
+        );
     }
 
     #[test]
@@ -607,27 +658,33 @@ mod tests {
         let format = parse_available_format(&value).expect("format should parse");
 
         assert!(format.has_audio);
-        assert_eq!(selected_format_selector(&format), "18");
+        assert_eq!(selected_format_selector(&format, "mp4"), "18");
     }
 
     #[test]
-    fn detects_new_downloaded_media_with_source_extension() {
-        let dir = unique_test_dir("media-discovery");
-        fs::create_dir_all(&dir).expect("test dir should be created");
-        let old_file = dir.join("old.mp4");
-        fs::write(&old_file, b"old").expect("old file should be written");
+    fn parses_downloaded_file_print_line() {
+        assert_eq!(
+            parse_downloaded_file_print("__YT_DOWNLOAD_TUI_FILE__:/tmp/video.mp4"),
+            Some(PathBuf::from("/tmp/video.mp4"))
+        );
+        assert_eq!(parse_downloaded_file_print("[download] 10.0%"), None);
+    }
 
-        let before = snapshot_media_files(&dir);
-        let started_at = SystemTime::now();
-        thread::sleep(Duration::from_millis(20));
+    #[test]
+    fn rejects_incompatible_exact_source_for_container() {
+        let value = json!({
+            "format_id": "248",
+            "ext": "webm",
+            "vcodec": "vp9",
+            "acodec": "none",
+            "height": 1080
+        });
 
-        let new_file = dir.join("source-format.webm");
-        fs::write(&new_file, b"new").expect("new file should be written");
+        let format = parse_available_format(&value).expect("format should parse");
 
-        let files = new_downloaded_files(&dir, &before, started_at);
-
-        assert_eq!(files, vec![new_file]);
-        fs::remove_dir_all(&dir).expect("test dir should be removed");
+        assert!(selected_format_container_error(&format, "mp4").is_some());
+        assert!(selected_format_container_error(&format, "webm").is_none());
+        assert!(selected_format_container_error(&format, "mkv").is_none());
     }
 
     #[test]
@@ -653,16 +710,5 @@ mod tests {
         assert!(!looks_like_playlist_only_url(
             "https://www.youtube.com/live/abc?list=PL123"
         ));
-    }
-
-    fn unique_test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "yt-download-tui-{name}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .expect("system clock should be after unix epoch")
-                .as_nanos()
-        ))
     }
 }

@@ -1,19 +1,19 @@
 use std::{
+    collections::HashSet,
     fs,
     io::{BufRead, BufReader, Read},
     path::PathBuf,
     process::{Command, Stdio},
-    sync::mpsc::Sender,
-    thread,
-    time::SystemTime,
+    sync::mpsc::{self, Receiver, Sender},
+    thread::{self, JoinHandle},
 };
 
 use crate::{
     media::{
-        append_video_encoder_args, effective_encoder_mode, fixed_mp4_path, format_duration,
-        format_selector, new_downloaded_files, parse_ffmpeg_out_time,
-        parse_ytdlp_playlist_progress, parse_ytdlp_progress, probe_duration,
-        selected_format_selector, snapshot_media_files,
+        append_video_encoder_args, downloaded_file_print_template, effective_encoder_mode,
+        fixed_mp4_path, format_duration, format_selector, parse_downloaded_file_print,
+        parse_ffmpeg_out_time, parse_ytdlp_playlist_progress, parse_ytdlp_progress, probe_duration,
+        selected_format_selector,
     },
     process_control::{prepare_command, shared_child, wait_for_child, ProcessControl, SharedChild},
     types::{AvailableFormat, EncoderMode, Progress, WorkerEvent},
@@ -44,9 +44,6 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
     fs::create_dir_all(&config.output_dir)
         .map_err(|error| format!("Could not create output directory: {error}"))?;
 
-    let started_at = SystemTime::now();
-    let before = snapshot_media_files(&config.output_dir);
-
     send_log(tx, format!("Output: {}", config.output_dir.display()));
     send_log(tx, format!("Resolution: {}", config.resolution));
     send_log(tx, format!("Format: {}", config.format));
@@ -64,9 +61,10 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
     let selector = config
         .selected_source_format
         .as_ref()
-        .map(selected_format_selector)
+        .map(|format| selected_format_selector(format, &config.format))
         .unwrap_or_else(|| format_selector(&config.format, &config.resolution));
     let output_template = download_output_template(&config.output_dir);
+    let (downloaded_file_tx, downloaded_file_rx) = mpsc::channel();
 
     let mut command = Command::new("yt-dlp");
     prepare_command(&mut command);
@@ -82,6 +80,10 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
         .arg(&config.format)
         .arg("--remux-video")
         .arg(&config.format)
+        .arg("--print")
+        .arg(downloaded_file_print_template())
+        .arg("--no-simulate")
+        .arg("--no-quiet")
         .arg("-f")
         .arg(selector)
         .arg("-o")
@@ -100,18 +102,29 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
     let child = shared_child(child);
     config.control.set_child(child.clone());
 
-    if let Err(error) = stream_child_output(&child, Sender::clone(tx), OutputKind::YtDlp) {
-        config.control.cancel();
-        config.control.clear_child();
-        return Err(error);
-    }
+    let readers = match stream_child_output(
+        &child,
+        Sender::clone(tx),
+        OutputKind::YtDlp {
+            downloaded_file_tx: Some(downloaded_file_tx),
+        },
+    ) {
+        Ok(readers) => readers,
+        Err(error) => {
+            config.control.cancel();
+            config.control.clear_child();
+            return Err(error);
+        }
+    };
 
     let status = wait_for_child(&child, &config.control, "yt-dlp");
     if status.is_err() {
         config.control.cancel();
     }
     config.control.clear_child();
+    let reader_result = join_output_readers(readers, "yt-dlp");
     let status = status?;
+    reader_result?;
 
     if config.control.is_cancelled() {
         return Err("Cancelled.".to_string());
@@ -124,7 +137,7 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
     send_log(tx, "Download completed.");
 
     if config.convert {
-        let files = new_downloaded_files(&config.output_dir, &before, started_at);
+        let files = collect_downloaded_files(downloaded_file_rx);
         convert_files(tx, files, config.encoder_mode, &config.control)?;
     }
 
@@ -145,7 +158,7 @@ fn stream_child_output(
     child: &SharedChild,
     tx: Sender<WorkerEvent>,
     kind: OutputKind,
-) -> Result<(), String> {
+) -> Result<Vec<JoinHandle<()>>, String> {
     let mut child = child
         .lock()
         .map_err(|_| "Process lock was poisoned.".to_string())?;
@@ -158,17 +171,20 @@ fn stream_child_output(
         .take()
         .ok_or_else(|| "Could not capture process stderr.".to_string())?;
 
-    spawn_reader(stdout, tx.clone(), kind);
-    spawn_reader(stderr, tx, kind);
-    Ok(())
+    Ok(vec![
+        spawn_reader(stdout, tx.clone(), kind.clone()),
+        spawn_reader(stderr, tx, kind),
+    ])
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum OutputKind {
-    YtDlp,
+    YtDlp {
+        downloaded_file_tx: Option<Sender<PathBuf>>,
+    },
 }
 
-fn spawn_reader<R>(reader: R, tx: Sender<WorkerEvent>, kind: OutputKind)
+fn spawn_reader<R>(reader: R, tx: Sender<WorkerEvent>, kind: OutputKind) -> JoinHandle<()>
 where
     R: Read + Send + 'static,
 {
@@ -182,21 +198,37 @@ where
                 continue;
             }
 
-            if let Some(progress) = match kind {
-                OutputKind::YtDlp => parse_ytdlp_progress(&line),
+            if let Some(path) = match &kind {
+                OutputKind::YtDlp { .. } => parse_downloaded_file_print(&line),
+            } {
+                if let OutputKind::YtDlp {
+                    downloaded_file_tx: Some(downloaded_file_tx),
+                } = &kind
+                {
+                    let _ = downloaded_file_tx.send(path.clone());
+                }
+                let _ = tx.send(WorkerEvent::Log(format!(
+                    "Downloaded file: {}",
+                    path.display()
+                )));
+                continue;
+            }
+
+            if let Some(progress) = match &kind {
+                OutputKind::YtDlp { .. } => parse_ytdlp_progress(&line),
             } {
                 let _ = tx.send(WorkerEvent::Progress(progress));
             }
 
-            if let Some(progress) = match kind {
-                OutputKind::YtDlp => parse_ytdlp_playlist_progress(&line),
+            if let Some(progress) = match &kind {
+                OutputKind::YtDlp { .. } => parse_ytdlp_playlist_progress(&line),
             } {
                 let _ = tx.send(WorkerEvent::Playlist(progress));
             }
 
             let _ = tx.send(WorkerEvent::Log(line));
         }
-    });
+    })
 }
 
 fn convert_files(
@@ -281,7 +313,7 @@ fn convert_files(
         let child = shared_child(child);
         control.set_child(child.clone());
 
-        if let Err(error) = stream_ffmpeg_output(
+        let readers = match stream_ffmpeg_output(
             &child,
             Sender::clone(tx),
             FfmpegProgressContext {
@@ -291,17 +323,22 @@ fn convert_files(
                 detail,
             },
         ) {
-            control.cancel();
-            control.clear_child();
-            return Err(error);
-        }
+            Ok(readers) => readers,
+            Err(error) => {
+                control.cancel();
+                control.clear_child();
+                return Err(error);
+            }
+        };
 
         let status = wait_for_child(&child, control, "ffmpeg");
         if status.is_err() {
             control.cancel();
         }
         control.clear_child();
+        let reader_result = join_output_readers(readers, "ffmpeg");
         let status = status?;
+        reader_result?;
 
         if control.is_cancelled() {
             return Err("Cancelled.".to_string());
@@ -339,7 +376,7 @@ fn stream_ffmpeg_output(
     child: &SharedChild,
     tx: Sender<WorkerEvent>,
     context: FfmpegProgressContext,
-) -> Result<(), String> {
+) -> Result<Vec<JoinHandle<()>>, String> {
     let mut child = child
         .lock()
         .map_err(|_| "ffmpeg process lock was poisoned.".to_string())?;
@@ -352,16 +389,18 @@ fn stream_ffmpeg_output(
         .take()
         .ok_or_else(|| "Could not capture ffmpeg stderr.".to_string())?;
 
-    spawn_ffmpeg_progress_reader(stdout, tx.clone(), context);
-    spawn_ffmpeg_log_reader(stderr, tx);
-    Ok(())
+    Ok(vec![
+        spawn_ffmpeg_progress_reader(stdout, tx.clone(), context),
+        spawn_ffmpeg_log_reader(stderr, tx),
+    ])
 }
 
 fn spawn_ffmpeg_progress_reader<R>(
     reader: R,
     tx: Sender<WorkerEvent>,
     context: FfmpegProgressContext,
-) where
+) -> JoinHandle<()>
+where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
@@ -413,10 +452,10 @@ fn spawn_ffmpeg_progress_reader<R>(
                 detail,
             }));
         }
-    });
+    })
 }
 
-fn spawn_ffmpeg_log_reader<R>(reader: R, tx: Sender<WorkerEvent>)
+fn spawn_ffmpeg_log_reader<R>(reader: R, tx: Sender<WorkerEvent>) -> JoinHandle<()>
 where
     R: Read + Send + 'static,
 {
@@ -431,7 +470,31 @@ where
             }
             let _ = tx.send(WorkerEvent::Log(line));
         }
-    });
+    })
+}
+
+fn join_output_readers(readers: Vec<JoinHandle<()>>, process_name: &str) -> Result<(), String> {
+    for reader in readers {
+        reader
+            .join()
+            .map_err(|_| format!("{process_name} output reader stopped unexpectedly."))?;
+    }
+
+    Ok(())
+}
+
+fn collect_downloaded_files(rx: Receiver<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+
+    for path in rx.try_iter() {
+        if seen.insert(path.clone()) {
+            files.push(path);
+        }
+    }
+
+    files.sort();
+    files
 }
 
 fn send_log(tx: &Sender<WorkerEvent>, line: impl Into<String>) {

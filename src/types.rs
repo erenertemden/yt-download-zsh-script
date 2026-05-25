@@ -50,6 +50,8 @@ pub struct AvailableFormat {
     pub id: String,
     pub label: String,
     pub ext: String,
+    pub vcodec: String,
+    pub acodec: String,
     pub height: Option<u32>,
     pub fps_label: Option<String>,
     pub has_audio: bool,

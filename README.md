@@ -138,6 +138,8 @@ Loading formats is optional. If you never press `f`, the app still downloads thr
 
 If the selected source format is video-only, the app combines it with `bestaudio`. Exact source format mode does not silently fall back to `best`; if the selected format is no longer available, `yt-dlp` fails and the app reports the error.
 
+Exact source format mode also checks the selected output container before starting. For example, a VP9 WebM source is rejected when the container is `mp4`; choose `mkv` or a compatible source format for that case.
+
 ---
 
 ## QuickTime Conversion
@@ -151,7 +153,7 @@ fixed-original-title [dQw4w9WgXcQ].mp4
 
 The converted file uses H.264 video and AAC audio in an `.mp4` container, which is the safest default for QuickTime Player on macOS.
 
-Conversion runs only against newly downloaded or newly modified media files in the output folder. If `yt-dlp` finishes but no new media file can be found, the app reports that as a failure instead of showing a false successful conversion.
+Conversion runs only against final file paths reported by `yt-dlp` after each download is moved into place. If `yt-dlp` finishes but does not report a media file to convert, the app reports that as a failure instead of scanning unrelated files from the output folder.
 
 Downloaded filenames include the video ID, for example `Title [dQw4w9WgXcQ].mp4`, so playlist items with the same title do not overwrite each other.
 

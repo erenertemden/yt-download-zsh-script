@@ -8,11 +8,11 @@ mod terminal;
 mod types;
 mod ui;
 
-use terminal::{restore_terminal, run_app, setup_terminal, AppResult};
+use terminal::{run_app, setup_terminal, AppResult};
 
 fn main() -> AppResult<()> {
     let mut terminal = setup_terminal()?;
-    let result = run_app(&mut terminal);
-    restore_terminal(&mut terminal)?;
+    let result = run_app(terminal.terminal_mut());
+    terminal.restore()?;
     result
 }

@@ -13,7 +13,10 @@ use crate::{
         MAX_LOG_LINES, RESOLUTIONS,
     },
     job::{run_download_job, JobConfig},
-    media::{load_available_formats_with_control, looks_like_playlist_only_url},
+    media::{
+        load_available_formats_with_control, looks_like_playlist_only_url,
+        selected_format_container_error,
+    },
     process_control::ProcessControl,
     system::open_output_dir,
     types::{AvailableFormat, EncoderMode, Focus, PlaylistProgress, Progress, Screen, WorkerEvent},
@@ -269,6 +272,16 @@ impl App {
             self.status =
                 "Source Format is single-video only. Use Auto best for playlist URLs.".to_string();
             return;
+        }
+
+        if let Some(source_format) = self.selected_source_format() {
+            if let Some(error) =
+                selected_format_container_error(source_format, FORMATS[self.format_idx])
+            {
+                self.status = error;
+                self.focus = Focus::SourceFormat;
+                return;
+            }
         }
 
         let output_dir = match expand_output_dir(&self.output_dir_input) {
