@@ -9,6 +9,7 @@ use ratatui::{
 use crate::{
     app::{App, DirectoryPicker},
     config::FORMATS,
+    theme::Theme,
     types::{Focus, Progress, Screen},
 };
 
@@ -40,11 +41,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(
             "YouTube Downloader TUI",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(app.theme.title)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(&app.status, Style::default().fg(Color::Gray)),
+        Span::styled(&app.status, Style::default().fg(app.theme.status)),
     ]);
 
     let header = Paragraph::new(title)
@@ -55,6 +56,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     let value_width = usize::from(area.width.saturating_sub(18));
+    let theme = &app.theme;
     let rows = vec![
         selectable_line(
             app.focus == Focus::Url,
@@ -66,6 +68,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             },
             FieldKind::Text,
             value_width,
+            theme,
         ),
         selectable_line(
             app.focus == Focus::SourceFormat,
@@ -73,6 +76,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             app.source_format_label(),
             FieldKind::Choice,
             value_width,
+            theme,
         ),
         selectable_line(
             app.focus == Focus::Resolution,
@@ -84,6 +88,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
                 FieldKind::ReadOnly
             },
             value_width,
+            theme,
         ),
         selectable_line(
             app.focus == Focus::Format,
@@ -91,6 +96,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             FORMATS[app.format_idx],
             FieldKind::Choice,
             value_width,
+            theme,
         ),
         selectable_line(
             app.focus == Focus::Convert,
@@ -98,6 +104,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             if app.convert { "enabled" } else { "disabled" },
             FieldKind::Toggle(app.convert),
             value_width,
+            theme,
         ),
         selectable_line(
             app.focus == Focus::Encoder,
@@ -113,6 +120,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
                 FieldKind::ReadOnly
             },
             value_width,
+            theme,
         ),
         selectable_line(
             app.focus == Focus::Output,
@@ -120,9 +128,10 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             &app.output_dir_input,
             FieldKind::Text,
             value_width,
+            theme,
         ),
         Line::raw(""),
-        button_line(app.focus == Focus::Start, "Start Download"),
+        button_line(app.focus == Focus::Start, "Start Download", theme),
     ];
 
     let paragraph = Paragraph::new(rows)
@@ -157,7 +166,11 @@ fn draw_running(frame: &mut Frame, app: &App, area: Rect) {
                 .title(progress.detail)
                 .borders(Borders::ALL),
         )
-        .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
+        .gauge_style(
+            Style::default()
+                .fg(app.theme.gauge_fg)
+                .bg(app.theme.gauge_bg),
+        )
         .ratio(ratio)
         .label(label);
     frame.render_widget(gauge, chunks[0]);
@@ -182,27 +195,35 @@ fn draw_output_picker(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    draw_output_picker_summary(frame, picker, chunks[0]);
-    draw_output_picker_entries(frame, picker, chunks[1]);
+    draw_output_picker_summary(frame, picker, &app.theme, chunks[0]);
+    draw_output_picker_entries(frame, picker, &app.theme, chunks[1]);
 }
 
-fn draw_output_picker_summary(frame: &mut Frame, picker: &DirectoryPicker, area: Rect) {
+fn draw_output_picker_summary(
+    frame: &mut Frame,
+    picker: &DirectoryPicker,
+    theme: &Theme,
+    area: Rect,
+) {
     let mut rows = vec![
         Line::from(vec![
-            Span::styled("Current  ", Style::default().fg(Color::Gray)),
+            Span::styled("Current  ", Style::default().fg(theme.label)),
             Span::styled(
                 picker.current_dir.display().to_string(),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme.value),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Folders  ", Style::default().fg(Color::Gray)),
+            Span::styled("Folders  ", Style::default().fg(theme.label)),
             Span::raw(picker.entries.len().to_string()),
         ]),
     ];
 
     if let Some(error) = picker.error.as_ref() {
-        rows.push(Line::styled(error.clone(), Style::default().fg(Color::Red)));
+        rows.push(Line::styled(
+            error.clone(),
+            Style::default().fg(theme.error),
+        ));
     }
 
     let paragraph = Paragraph::new(rows)
@@ -215,13 +236,18 @@ fn draw_output_picker_summary(frame: &mut Frame, picker: &DirectoryPicker, area:
     frame.render_widget(paragraph, area);
 }
 
-fn draw_output_picker_entries(frame: &mut Frame, picker: &DirectoryPicker, area: Rect) {
+fn draw_output_picker_entries(
+    frame: &mut Frame,
+    picker: &DirectoryPicker,
+    theme: &Theme,
+    area: Rect,
+) {
     let visible_rows = area.height.saturating_sub(2) as usize;
     let start = scroll_start(picker.selected_idx, visible_rows, picker.entries.len());
     let items = if picker.entries.is_empty() {
         vec![ListItem::new(Line::styled(
             "No folders found",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.help),
         ))]
     } else {
         picker
@@ -236,10 +262,10 @@ fn draw_output_picker_entries(frame: &mut Frame, picker: &DirectoryPicker, area:
                 let marker = if selected { "> " } else { "  " };
                 let style = if selected {
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.selected)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme.value)
                 };
 
                 ListItem::new(Line::from(vec![
@@ -279,7 +305,11 @@ fn draw_queue(frame: &mut Frame, app: &App, area: Rect) {
 
     let gauge = Gauge::default()
         .block(Block::default().title("Queue").borders(Borders::ALL))
-        .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+        .gauge_style(
+            Style::default()
+                .fg(app.theme.queue_fg)
+                .bg(app.theme.gauge_bg),
+        )
         .ratio(ratio)
         .label(label);
     frame.render_widget(gauge, area);
@@ -338,7 +368,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     };
     let help = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(app.theme.help));
     frame.render_widget(help, area);
 }
 
@@ -348,20 +378,21 @@ fn selectable_line(
     value: &str,
     kind: FieldKind,
     max_value_width: usize,
+    theme: &Theme,
 ) -> Line<'static> {
     let marker = if selected { "> " } else { "  " };
     let value_style = if selected {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(theme.selected)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.value)
     };
     let value = format_field_value(value, kind, selected, max_value_width);
 
     Line::from(vec![
         Span::raw(marker),
-        Span::styled(format!("{label:<14}"), Style::default().fg(Color::Gray)),
+        Span::styled(format!("{label:<14}"), Style::default().fg(theme.label)),
         Span::styled(value, value_style),
     ])
 }
@@ -374,14 +405,14 @@ enum FieldKind {
     ReadOnly,
 }
 
-fn button_line(selected: bool, label: &str) -> Line<'static> {
+fn button_line(selected: bool, label: &str, theme: &Theme) -> Line<'static> {
     let style = if selected {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
+            .fg(theme.button_fg)
+            .bg(theme.button_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme.button_unsel)
     };
 
     Line::from(vec![

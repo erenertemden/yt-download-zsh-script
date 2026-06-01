@@ -20,6 +20,7 @@ use crate::{
     },
     process_control::ProcessControl,
     system::open_output_dir,
+    theme::Theme,
     types::{AvailableFormat, EncoderMode, Focus, PlaylistProgress, Progress, Screen, WorkerEvent},
 };
 
@@ -42,6 +43,7 @@ pub struct App {
     pub progress: Option<Progress>,
     pub status: String,
     pub result_success: Option<bool>,
+    pub theme: Theme,
     worker_rx: Option<Receiver<WorkerEvent>>,
     worker_control: Option<ProcessControl>,
     format_rx: Option<Receiver<Result<Vec<AvailableFormat>, String>>>,
@@ -69,6 +71,7 @@ impl Default for App {
             progress: None,
             status: "Paste a video or playlist URL.".to_string(),
             result_success: None,
+            theme: crate::theme::detect(),
             worker_rx: None,
             worker_control: None,
             format_rx: None,

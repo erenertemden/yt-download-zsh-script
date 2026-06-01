@@ -5,6 +5,7 @@ mod media;
 mod process_control;
 mod system;
 mod terminal;
+mod theme;
 mod types;
 mod ui;
 
