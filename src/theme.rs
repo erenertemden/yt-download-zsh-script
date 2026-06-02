@@ -17,46 +17,26 @@ pub struct Theme {
     pub button_unsel: Color,
 }
 
+/// Build the UI theme.
+///
+/// Body text uses `Color::Reset` so it inherits the terminal's own foreground,
+/// which keeps it readable on both light and dark terminal backgrounds. We only
+/// pick explicit colors for accents (ANSI names the terminal maps into its own
+/// palette), and avoid forcing black/white text — that was tied to the macOS
+/// system appearance, which does not match the terminal's actual background.
 pub fn detect() -> Theme {
-    let dark = std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleInterfaceStyle"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "Dark")
-        .unwrap_or(false);
-    if dark { dark_theme() } else { light_theme() }
-}
-
-fn dark_theme() -> Theme {
     Theme {
         title: Color::Cyan,
-        status: Color::Gray,
-        label: Color::Gray,
-        value: Color::White,
-        selected: Color::Yellow,
+        status: Color::Reset,
+        label: Color::Reset,
+        value: Color::Reset,
+        selected: Color::Magenta,
         gauge_fg: Color::Green,
-        gauge_bg: Color::Black,
+        gauge_bg: Color::Reset,
         queue_fg: Color::Cyan,
         error: Color::Red,
-        help: Color::DarkGray,
+        help: Color::Reset,
         button_fg: Color::Black,
-        button_bg: Color::Green,
-        button_unsel: Color::Green,
-    }
-}
-
-fn light_theme() -> Theme {
-    Theme {
-        title: Color::Blue,
-        status: Color::DarkGray,
-        label: Color::DarkGray,
-        value: Color::Black,
-        selected: Color::Blue,
-        gauge_fg: Color::White,
-        gauge_bg: Color::Green,
-        queue_fg: Color::Blue,
-        error: Color::Red,
-        help: Color::Gray,
-        button_fg: Color::White,
         button_bg: Color::Green,
         button_unsel: Color::Green,
     }

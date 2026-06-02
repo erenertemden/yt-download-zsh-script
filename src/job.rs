@@ -26,6 +26,7 @@ pub struct JobConfig {
     pub format: String,
     pub output_dir: PathBuf,
     pub convert: bool,
+    pub delete_original: bool,
     pub encoder_mode: EncoderMode,
     pub selected_source_format: Option<AvailableFormat>,
     pub control: ProcessControl,
@@ -138,7 +139,13 @@ fn run_download_job_inner(tx: &Sender<WorkerEvent>, config: &JobConfig) -> Resul
 
     if config.convert {
         let files = collect_downloaded_files(downloaded_file_rx);
-        convert_files(tx, files, config.encoder_mode, &config.control)?;
+        convert_files(
+            tx,
+            files,
+            config.encoder_mode,
+            config.delete_original,
+            &config.control,
+        )?;
     }
 
     let message = if config.convert {
@@ -217,7 +224,10 @@ where
             if let Some(progress) = match &kind {
                 OutputKind::YtDlp { .. } => parse_ytdlp_progress(&line),
             } {
+                // High-frequency progress lines are surfaced by the gauge, so
+                // skip logging them to avoid flooding the (capped) log panel.
                 let _ = tx.send(WorkerEvent::Progress(progress));
+                continue;
             }
 
             if let Some(progress) = match &kind {
@@ -235,6 +245,7 @@ fn convert_files(
     tx: &Sender<WorkerEvent>,
     files: Vec<PathBuf>,
     encoder_mode: EncoderMode,
+    delete_original: bool,
     control: &ProcessControl,
 ) -> Result<(), String> {
     if files.is_empty() {
@@ -353,6 +364,24 @@ fn convert_files(
             ratio: Some((index + 1) as f64 / files.len() as f64),
             detail: "File converted.".to_string(),
         }));
+
+        if delete_original && file.as_path() != output.as_path() {
+            match fs::remove_file(file) {
+                Ok(()) => send_log(
+                    tx,
+                    format!(
+                        "Removed original: {}",
+                        file.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("original file")
+                    ),
+                ),
+                Err(error) => send_log(
+                    tx,
+                    format!("Could not remove original {}: {error}", file.display()),
+                ),
+            }
+        }
     }
 
     let _ = tx.send(WorkerEvent::Progress(Progress {

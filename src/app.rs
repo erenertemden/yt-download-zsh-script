@@ -10,8 +10,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     config::{
-        cycle_index, default_output_dir, default_output_dir_input, expand_output_dir, FORMATS,
-        MAX_LOG_LINES, RESOLUTIONS,
+        cycle_index, default_output_dir, default_output_dir_input, expand_output_dir, home_dir,
+        FORMATS, MAX_LOG_LINES, RESOLUTIONS,
     },
     job::{run_download_job, JobConfig},
     media::{
@@ -34,6 +34,7 @@ pub struct App {
     pub available_formats: Vec<AvailableFormat>,
     pub formats_loading: bool,
     pub convert: bool,
+    pub delete_original: bool,
     pub encoder_mode: EncoderMode,
     pub output_dir_input: String,
     pub output_dir: PathBuf,
@@ -62,6 +63,7 @@ impl Default for App {
             available_formats: Vec::new(),
             formats_loading: false,
             convert: true,
+            delete_original: false,
             encoder_mode: EncoderMode::default(),
             output_dir_input: default_output_dir_input(),
             output_dir: default_output_dir(),
@@ -193,6 +195,9 @@ impl App {
             KeyCode::Left => self.adjust_selection(-1),
             KeyCode::Right => self.adjust_selection(1),
             KeyCode::Char(' ') if self.focus == Focus::Convert => self.convert = !self.convert,
+            KeyCode::Char(' ') if self.focus == Focus::DeleteOriginal => {
+                self.delete_original = !self.delete_original
+            }
             KeyCode::Backspace if self.focus == Focus::Url => {
                 self.url.pop();
                 self.clear_loaded_formats();
@@ -284,6 +289,7 @@ impl App {
                 self.format_idx = cycle_index(self.format_idx, FORMATS.len(), direction);
             }
             Focus::Convert => self.convert = !self.convert,
+            Focus::DeleteOriginal => self.delete_original = !self.delete_original,
             Focus::Encoder => self.encoder_mode = self.encoder_mode.next(),
             _ => {}
         }
@@ -338,6 +344,7 @@ impl App {
         let resolution = RESOLUTIONS[self.resolution_idx].to_string();
         let format = FORMATS[self.format_idx].to_string();
         let convert = self.convert;
+        let delete_original = self.delete_original;
         let encoder_mode = self.encoder_mode;
         let selected_source_format = self.selected_source_format().cloned();
         let control = ProcessControl::new();
@@ -353,6 +360,7 @@ impl App {
                     format,
                     output_dir,
                     convert,
+                    delete_original,
                     encoder_mode,
                     selected_source_format,
                     control: job_control,
@@ -660,8 +668,4 @@ fn existing_directory_or_parent(path: &Path) -> Option<PathBuf> {
             return None;
         }
     }
-}
-
-fn home_dir() -> Option<PathBuf> {
-    env::var("HOME").ok().map(PathBuf::from)
 }

@@ -14,6 +14,7 @@ pub enum Focus {
     Format,
     Convert,
     Encoder,
+    DeleteOriginal,
     Output,
     Start,
 }
@@ -26,7 +27,8 @@ impl Focus {
             Self::Resolution => Self::Format,
             Self::Format => Self::Convert,
             Self::Convert => Self::Encoder,
-            Self::Encoder => Self::Output,
+            Self::Encoder => Self::DeleteOriginal,
+            Self::DeleteOriginal => Self::Output,
             Self::Output => Self::Start,
             Self::Start => Self::Url,
         }
@@ -40,7 +42,8 @@ impl Focus {
             Self::Format => Self::Resolution,
             Self::Convert => Self::Format,
             Self::Encoder => Self::Convert,
-            Self::Output => Self::Encoder,
+            Self::DeleteOriginal => Self::Encoder,
+            Self::Output => Self::DeleteOriginal,
             Self::Start => Self::Output,
         }
     }

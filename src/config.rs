@@ -49,7 +49,7 @@ pub fn cycle_index(current: usize, len: usize, direction: isize) -> usize {
     }
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     env::var("HOME").ok().map(PathBuf::from)
 }
 

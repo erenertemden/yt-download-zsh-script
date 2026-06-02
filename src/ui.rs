@@ -123,6 +123,24 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             theme,
         ),
         selectable_line(
+            app.focus == Focus::DeleteOriginal,
+            "Delete original",
+            if !app.convert {
+                "not used"
+            } else if app.delete_original {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            if app.convert {
+                FieldKind::Toggle(app.delete_original)
+            } else {
+                FieldKind::ReadOnly
+            },
+            value_width,
+            theme,
+        ),
+        selectable_line(
             app.focus == Focus::Output,
             "Output",
             &app.output_dir_input,
